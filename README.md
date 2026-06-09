@@ -8,19 +8,12 @@ Ninjasana treats the mouse as a first-class input: click views and tasks, scroll
 lists, collapse sections, drag rows to reorder them, and drag the column
 dividers to resize them.
 
-```
-╭───────────────────────────────────────────────────────────────────────────╮
-│ Ninjasana  ·  Asana in your terminal   Your Name                    [ Quit ]│
-╰───────────────────────────────────────────────────────────────────────────╯
-╭ Navigation ──╮╭ My Tasks ───────────────────────────────────╮╭ Task ───────╮
-│★ My Tasks    ││  Name           │Due Date  │Status│Tags  ││ Deploy …    │
-│# Engineering ││▾ Now (1)                                     ││ ○ incomplete│
-│# Design       │ ○ Deploy SignalR…│2026-06-12│Development│      ││ Assignee: … │
-│# Roadmap      │▾ Today (3)                                    ││ Due: …      │
-│              ││ ○ Read-only SQL …│—         │Development│infra ││ Notes …     │
-╰──────────────╯╰──────────────────────────────────────────────╯╰─────────────╯
- click: open · drag row: reorder · drag │: resize · click section: collapse · q: quit
-```
+<!-- Screenshot: save one to docs/screenshot.png and uncomment the line below. -->
+<!-- ![Ninjasana](docs/screenshot.png) -->
+
+A three-pane layout — **Navigation** (My Tasks + your projects) · **Tasks**
+(sectioned, sortable, resizable table) · **Task detail** (fields, description,
+subtasks, comments) — mirroring Asana's web app.
 
 ## Contents
 
