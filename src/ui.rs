@@ -13,6 +13,8 @@ use crate::app::{App, AppMode, DropTarget, Nav, Zone};
 use crate::settings::Column;
 
 const ACCENT: Color = Color::Cyan;
+/// Column separator / resize handle glyph.
+const DIVIDER: char = '│';
 
 /// One row of the middle pane: a section header or a task within a section.
 enum Row {
@@ -149,14 +151,14 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Column widths: fixed columns keep their width; Name flexes to fill. The
-    // leading 2 columns are reserved for the status mark ("○ ").
-    let widths = column_widths(&app.columns, (inner.width as usize).saturating_sub(2));
+    // Column widths: fixed columns keep their (possibly resized) width; Name
+    // flexes to fill. The leading 2 columns are reserved for the mark ("○ ").
+    let widths = distribute_widths(app, (inner.width as usize).saturating_sub(2));
 
     let mut header = String::from("  ");
     for (i, (column, width)) in app.columns.iter().zip(&widths).enumerate() {
         if i > 0 {
-            header.push(' ');
+            header.push(DIVIDER);
         }
         header.push_str(&fit(&column.title(), *width));
     }
@@ -205,6 +207,27 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
         match *row {
             Row::Header(si) => render_section_header(frame, app, si, rect),
             Row::Task(si, ti) => render_task_row(frame, app, si, ti, &widths, rect),
+        }
+    }
+
+    // Register a 1-column drag handle on each fixed column's right-edge divider.
+    // Spanning the full pane height makes the thin handle easy to grab.
+    let mut x = inner.x + 2;
+    for (i, width) in widths.iter().enumerate() {
+        x += *width as u16;
+        if i + 1 < app.columns.len() {
+            if !app.columns[i].is_name() {
+                app.zones.push(
+                    Zone::ResizeHandle(i),
+                    Rect {
+                        x,
+                        y: inner.y,
+                        width: 1,
+                        height: inner.height,
+                    },
+                );
+            }
+            x += 1; // the divider column
         }
     }
 }
@@ -272,7 +295,7 @@ fn render_task_row(
         let mut line = format!("{mark} ");
         for (i, (column, width)) in app.columns.iter().zip(widths).enumerate() {
             if i > 0 {
-                line.push(' ');
+                line.push(DIVIDER);
             }
             line.push_str(&fit(&column.value(&task), *width));
         }
@@ -284,7 +307,10 @@ fn render_task_row(
         )];
         for (i, (column, width)) in app.columns.iter().zip(widths).enumerate() {
             if i > 0 {
-                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    DIVIDER.to_string(),
+                    Style::new().fg(Color::DarkGray),
+                ));
             }
             let value = column.value(&task);
             spans.push(Span::styled(fit(&value, *width), column_style(column, &value)));
@@ -355,7 +381,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints = match app.mode {
         AppMode::Full => {
-            " click: open · drag: reorder · click section: collapse · scroll · ↑/↓: move · q: quit "
+            " click: open · drag row: reorder · drag │: resize · click section: collapse · ↑/↓: move · q: quit "
         }
         AppMode::TaskDetail(_) => " q: quit ",
     };
@@ -414,17 +440,28 @@ fn status_color(value: &str) -> Color {
     }
 }
 
-/// Distribute `total` columns across `columns`: fixed columns keep their width,
-/// `Name` columns split whatever is left (min 12 each).
-fn column_widths(columns: &[Column], total: usize) -> Vec<usize> {
+/// Distribute `total` columns: fixed columns keep their (possibly resized)
+/// width, `Name` columns split whatever is left (min 12 each).
+fn distribute_widths(app: &App, total: usize) -> Vec<usize> {
+    let columns = &app.columns;
     let separators = columns.len().saturating_sub(1);
-    let fixed: usize = columns.iter().filter(|c| !c.is_name()).map(|c| c.width()).sum();
+    let fixed: usize = columns
+        .iter()
+        .filter(|c| !c.is_name())
+        .map(|c| app.column_width(c))
+        .sum();
     let name_count = columns.iter().filter(|c| c.is_name()).count().max(1);
     let remaining = total.saturating_sub(fixed + separators);
     let name_width = (remaining / name_count).max(12);
     columns
         .iter()
-        .map(|c| if c.is_name() { name_width } else { c.width() })
+        .map(|c| {
+            if c.is_name() {
+                name_width
+            } else {
+                app.column_width(c)
+            }
+        })
         .collect()
 }
 

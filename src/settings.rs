@@ -72,6 +72,19 @@ impl Column {
         matches!(self, Column::Name)
     }
 
+    /// Stable identity for persisting per-column state (e.g. resized width).
+    pub fn key(&self) -> String {
+        match self {
+            Column::Name => "name".to_string(),
+            Column::DueDate => "due_date".to_string(),
+            Column::Assignee => "assignee".to_string(),
+            Column::Projects => "projects".to_string(),
+            Column::Tags => "tags".to_string(),
+            Column::Completed => "completed".to_string(),
+            Column::Custom(name) => format!("custom:{name}"),
+        }
+    }
+
     /// The cell value for a task.
     pub fn value(&self, task: &Task) -> String {
         match self {

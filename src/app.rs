@@ -19,7 +19,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Task, TaskDetail, TaskListKey};
 use crate::event::{Event, EventBus};
 use crate::settings::{Column, ProjectSource};
-use crate::state::CollapseStore;
+use crate::state::UiState;
+
+/// Minimum width a resizable column can be dragged to.
+const MIN_COL_WIDTH: usize = 3;
 use crate::tui::Tui;
 use crate::ui;
 
@@ -47,7 +50,17 @@ pub enum Zone {
     Section(usize),
     /// A task row — `(section index, task index)`.
     TaskRow(usize, usize),
+    /// A column divider — drag to resize the column at this index.
+    ResizeHandle(usize),
     Quit,
+}
+
+/// In-progress column resize.
+#[derive(Clone, Copy)]
+pub struct Resize {
+    col: usize,
+    start_x: u16,
+    start_width: usize,
 }
 
 /// The set of clickable regions for the current frame. Rebuilt every render.
@@ -149,8 +162,10 @@ pub struct App {
     project_source: ProjectSource,
     /// In-progress drag of a task row, if any.
     pub drag: Option<Drag>,
-    /// Persisted section-collapse state.
-    collapse: CollapseStore,
+    /// In-progress column resize, if any.
+    resize: Option<Resize>,
+    /// Persisted UI state (section collapse, column widths).
+    ui_state: UiState,
 
     pub status: String,
     pub zones: ZoneMap,
@@ -185,7 +200,8 @@ impl App {
             columns,
             project_source,
             drag: None,
-            collapse: CollapseStore::load(),
+            resize: None,
+            ui_state: UiState::load(),
             status: String::new(),
             zones: ZoneMap::default(),
         };
@@ -272,20 +288,37 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(zone) = self.zones.hit(mouse.column, mouse.row) {
-                    // Pressing a task row both selects it and arms a potential
-                    // drag; whether it becomes a drag depends on later motion.
-                    if let Zone::TaskRow(si, ti) = zone {
-                        self.drag = Some(Drag {
-                            from: (si, ti),
-                            over: None,
-                            moved: false,
-                        });
+                    match zone {
+                        // A column divider arms a resize.
+                        Zone::ResizeHandle(col) => {
+                            self.resize = Some(Resize {
+                                col,
+                                start_x: mouse.column,
+                                start_width: self.effective_width(col),
+                            });
+                        }
+                        // Pressing a task row selects it and arms a potential
+                        // drag; whether it becomes a drag depends on motion.
+                        Zone::TaskRow(si, ti) => {
+                            self.drag = Some(Drag {
+                                from: (si, ti),
+                                over: None,
+                                moved: false,
+                            });
+                            self.activate(zone);
+                        }
+                        other => self.activate(other),
                     }
-                    self.activate(zone);
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.drag.is_some() {
+                if let Some(resize) = self.resize {
+                    let delta = mouse.column as i32 - resize.start_x as i32;
+                    let width = (resize.start_width as i32 + delta).max(MIN_COL_WIDTH as i32) as usize;
+                    let key = self.columns[resize.col].key();
+                    self.ui_state.set_column_width(&key, width);
+                    self.status = format!("{} width: {width}", self.columns[resize.col].title());
+                } else if self.drag.is_some() {
                     let target = self.zones.drop_target(mouse.column, mouse.row);
                     if let Some(drag) = self.drag.as_mut() {
                         drag.moved = true;
@@ -297,7 +330,9 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(drag) = self.drag.take()
+                if self.resize.take().is_some() {
+                    // Width was persisted live during the drag.
+                } else if let Some(drag) = self.drag.take()
                     && drag.moved
                     && let Some(target) = drag.over
                 {
@@ -319,11 +354,13 @@ impl App {
                     self.sections[index].collapsed = collapsed;
                     let nav = self.nav_key();
                     let key = section_key(&self.sections[index]);
-                    self.collapse.set(&nav, &key, collapsed);
+                    self.ui_state.set_collapsed(&nav, &key, collapsed);
                 }
             }
             Zone::TaskRow(section, task) => self.select_task(section, task),
             Zone::Quit => self.running = false,
+            // Resize handles are handled on press, never routed here.
+            Zone::ResizeHandle(_) => {}
         }
     }
 
@@ -573,7 +610,7 @@ impl App {
         self.sections = sections
             .into_iter()
             .map(|s| {
-                let collapsed = self.collapse.is_collapsed(&nav, &section_key_parts(&s.gid, &s.name));
+                let collapsed = self.ui_state.is_collapsed(&nav, &section_key_parts(&s.gid, &s.name));
                 SectionView {
                     gid: s.gid,
                     name: s.name,
@@ -585,6 +622,30 @@ impl App {
         self.scroll = 0;
         self.selected = None;
         self.detail = None;
+    }
+
+    /// Display width for a column: a persisted resize override, else its
+    /// default. `Name` returns 0, the renderer's "flex to fill" sentinel.
+    pub fn column_width(&self, column: &Column) -> usize {
+        if column.is_name() {
+            0
+        } else {
+            self.ui_state
+                .column_width(&column.key())
+                .unwrap_or_else(|| column.width())
+        }
+    }
+
+    /// Effective width of the column at `index` (used when starting a resize).
+    fn effective_width(&self, index: usize) -> usize {
+        self.columns
+            .get(index)
+            .map(|c| {
+                self.ui_state
+                    .column_width(&c.key())
+                    .unwrap_or_else(|| c.width())
+            })
+            .unwrap_or(MIN_COL_WIDTH)
     }
 
     /// Stable per-list key for the collapse store.

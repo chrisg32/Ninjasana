@@ -4,108 +4,244 @@ A **mouse-native**, layout-friendly terminal UI for [Asana](https://asana.com).
 
 Inspired by [herdr](https://herdr.dev) — and designed to run happily *inside* a
 herdr pane. Where most TUIs are keyboard-first with mouse support bolted on,
-Ninjasana treats the mouse as a first-class input: click views, click tasks,
-scroll lists, and (soon) drag to reorder and right-click for context menus.
+Ninjasana treats the mouse as a first-class input: click views and tasks, scroll
+lists, collapse sections, drag rows to reorder them, and drag the column
+dividers to resize them.
 
-## Why Rust + Ratatui?
+```
+╭───────────────────────────────────────────────────────────────────────────╮
+│ Ninjasana  ·  Asana in your terminal   Your Name                    [ Quit ]│
+╰───────────────────────────────────────────────────────────────────────────╯
+╭ Navigation ──╮╭ My Tasks ───────────────────────────────────╮╭ Task ───────╮
+│★ My Tasks    ││  Name           │Due Date  │Dev Status│Tags  ││ Deploy …    │
+│# Engineering ││▾ Now (1)                                     ││ ○ incomplete│
+│# Design       │ ○ Deploy SignalR…│2026-06-12│Development│      ││ Assignee: … │
+│# Roadmap      │▾ Today (3)                                    ││ Due: …      │
+│              ││ ○ Read-only SQL …│—         │Development│infra ││ Notes …     │
+╰──────────────╯╰──────────────────────────────────────────────╯╰─────────────╯
+ click: open · drag row: reorder · drag │: resize · click section: collapse · q: quit
+```
 
-The whole product is bespoke mouse interaction, so we want to own the screen
-geometry. [Ratatui](https://ratatui.rs) is immediate-mode: every frame we
-compute the layout rectangles and draw to them. That same set of rectangles is
-what we hit-test clicks against — one coordinate system, no separate retained
-widget tree to keep in sync. It's also the stack herdr itself is built on
-(Ratatui + crossterm), which keeps the mouse/escape-sequence model identical on
-both sides of the PTY boundary.
+## Contents
 
-The Asana API is reached directly over REST (`reqwest` + `serde`); Asana ships
-no official Rust SDK, and its responses map cleanly onto `serde` types.
+- [What it does](#what-it-does)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Log in](#log-in)
+- [Usage](#usage)
+- [Controls](#controls)
+- [Configuration](#configuration)
+- [Where your data lives](#where-your-data-lives)
+- [Running inside herdr](#running-inside-herdr)
+- [Development](#development)
+- [Why Rust + Ratatui](#why-rust--ratatui)
+- [License](#license)
 
-## Commands
+## What it does
+
+The full view mirrors how Asana looks in the browser, in three panes:
+
+- **Left — Navigation.** *My Tasks* pinned on top, then your projects (see
+  [Configuration](#configuration) for how the project list is chosen).
+- **Middle — Tasks.** The selected list's tasks, grouped into collapsible
+  **sections** in Asana's order, shown as a configurable, resizable table.
+  Tasks show an open circle (`○`); a row click only opens its detail, so you can
+  never accidentally complete a task. Tags and status-style custom fields are
+  color-coded.
+- **Right — Detail.** The selected task's details (status, assignee, due date,
+  notes, permalink), shown once a task is selected.
+
+You can also open a single task straight to the detail pane from its URL, which
+is handy as a quick `$EDITOR`-style "open this task" command.
+
+## Requirements
+
+- **Rust** (stable). Install via [rustup](https://rustup.rs).
+- **macOS** for secure credential storage — the login token is kept in the
+  macOS Keychain. On other platforms, build still works but use the
+  `ASANA_ACCESS_TOKEN` environment variable instead of `ninjasana login`
+  (see [Log in](#log-in)).
+- An **Asana account** and a Personal Access Token.
+
+## Install
+
+Clone and build a release binary:
 
 ```sh
-ninjasana            # full three-pane Asana view
-ninjasana <task_url> # open just the detail pane for one task (URL or bare id)
-ninjasana login      # store an Asana Personal Access Token (validated, kept in the OS keychain)
-ninjasana logout     # remove the stored token
+git clone https://github.com/chrisg32/Ninjasana.git
+cd Ninjasana
+cargo build --release
+# binary at ./target/release/ninjasana
 ```
 
-The full view mirrors how Asana looks in the browser:
-
-- **Left** — navigation: *My Tasks* pinned on top, then the projects you're a
-  member of.
-- **Middle** — the selected list's tasks, grouped into collapsible **sections**
-  in Asana's order, shown as a configurable table (see [Configuration](#configuration)).
-  **Drag a row** to reorder it within or across sections. Tasks show an open
-  circle (`○`) and **cannot be completed by clicking** — a row click only opens
-  its detail. Tags and status-style custom fields are color-coded.
-- **Right** — task detail, shown only once a task is selected.
-
-## Configuration
-
-Columns are read from `~/.config/ninjasana/config.toml` (honoring
-`XDG_CONFIG_HOME`); a generic default is written on first run. Set the columns
-and their order:
-
-```toml
-# Built-ins: "name", "due_date", "assignee", "projects", "tags", "completed"
-# Custom fields: "custom:<Asana field name>", e.g. "custom:Dev Status v2"
-columns = ["name", "due_date", "custom:Dev Status v2", "tags", "projects"]
-
-# Which projects appear in the nav pane. Either a mode...
-#   "favorites" — your favorited projects, in sidebar order (default)
-#   "member"    — every project you're a member of
-# ...or an explicit, ordered list of project names:
-#   projects = ["ISMS", "Sprint - Maximilian", "Software Department"]
-projects = "favorites"
-```
-
-Custom fields are referenced by name so nothing workspace-specific is hardcoded
-in the binary. Section collapse/expand state is remembered between runs (stored
-in `~/.config/ninjasana/state.json`).
-
-> Note: Asana's public API doesn't expose the web sidebar's curated "Projects"
-> list directly. `"favorites"` returns your favorited projects in sidebar order,
-> `"member"` returns the full set you belong to, and an explicit name list lets
-> you reproduce a curated sidebar exactly (names are matched case-insensitively,
-> in the order given).
-
-## Status
-
-Working today:
-
-- `login` / `logout` with a Personal Access Token stored in the macOS Keychain.
-- Live data: identity + workspace + projects on startup, My Tasks and per-project
-  task lists, and full task detail (status, assignee, due date, notes, permalink).
-- `ninjasana <task_url>` opens straight to the detail pane.
-- Mouse-native foundation: clickable nav, clickable task rows, a clickable Quit
-  button, scroll-wheel support, and panic-safe terminal restore — all built on a
-  `ZoneMap` that hit-tests clicks against the same rectangles we lay out.
-- An offline **demo mode** when no token is set, so you can click around.
-
-Next up: right-click context menus and a few display refinements.
-
-## Getting started
+Or install it onto your `PATH` with Cargo:
 
 ```sh
-# 1. Install Rust (rustup) if you haven't.
-cargo run -- login        # connect your account, or…
-cargo run                 # …just run it (demo mode without a token)
-
-# A token can also come from the environment instead of the keychain:
-cp .env.example .env      # then put an Asana PAT in .env
+cargo install --path .
+# now `ninjasana` is available anywhere
 ```
 
-### Controls
+## Log in
+
+Ninjasana authenticates with an Asana **Personal Access Token (PAT)**.
+
+1. Create a token at **https://app.asana.com/0/my-apps** → *Create new token*.
+2. Run:
+
+   ```sh
+   ninjasana login
+   ```
+
+   Paste the token when prompted. Ninjasana validates it against the Asana API
+   and stores it securely in your **macOS Keychain** (service `ninjasana`).
+
+To sign out and remove the stored token:
+
+```sh
+ninjasana logout
+```
+
+### Environment variable (CI / non-macOS / dev)
+
+Instead of `login`, you can supply the token via the environment. This takes
+precedence over the Keychain and works on any platform:
+
+```sh
+export ASANA_ACCESS_TOKEN=your_token_here
+ninjasana
+```
+
+A local `.env` file is also loaded automatically if present:
+
+```sh
+cp .env.example .env   # then edit .env
+```
+
+Without any token, Ninjasana runs in offline **demo mode** so you can explore
+the interface.
+
+## Usage
+
+```sh
+ninjasana                 # full three-pane Asana view
+ninjasana <task_url>      # open just the detail pane for one task
+ninjasana login           # store an Asana Personal Access Token
+ninjasana logout          # remove the stored token
+ninjasana --help          # full help
+```
+
+`<task_url>` accepts a full Asana task URL (e.g.
+`https://app.asana.com/0/<project>/<task>` or the newer
+`.../task/<task>` form) or a bare numeric task id.
+
+## Controls
 
 | Input | Action |
 | --- | --- |
 | Click a nav entry | Switch list (My Tasks / a project) |
-| Click a section header | Collapse / expand the section |
+| Click a section header | Collapse / expand the section (remembered between runs) |
 | Click a task row | Open its detail pane (never completes the task) |
 | **Drag a task row** | Reorder within / across sections |
+| **Drag a column divider** (`│`) | Resize that column |
 | Scroll wheel | Scroll the task list |
-| ↑/↓ or `j`/`k` | Move task selection |
+| ↑ / ↓ or `j` / `k` | Move task selection |
 | Click **Quit** / `q` / `Esc` | Exit |
+
+## Configuration
+
+Configuration lives at `~/.config/ninjasana/config.toml` (honoring
+`XDG_CONFIG_HOME`). A generic default is written automatically on first run, so
+you can just edit it.
+
+```toml
+# Columns shown in the task table, in order. Built-in columns:
+#   "name", "due_date", "assignee", "projects", "tags", "completed"
+# Custom fields use a "custom:" prefix with the exact Asana field name:
+#   "custom:Dev Status v2"
+columns = ["name", "due_date", "assignee", "projects", "tags"]
+
+# Which projects appear in the navigation pane. Either a mode...
+#   "favorites" — your favorited projects, in sidebar order (default)
+#   "member"    — every project you're a member of
+# ...or an explicit, ordered list of project names to show exactly those:
+#   projects = ["ISMS", "Sprint - Maximilian", "Software Department"]
+projects = "favorites"
+```
+
+### Columns
+
+Each entry in `columns` is either a built-in (`name`, `due_date`, `assignee`,
+`projects`, `tags`, `completed`) or a custom field referenced by its exact Asana
+name with a `custom:` prefix. Custom fields are referenced by name so nothing
+workspace-specific is hardcoded in the binary. The `name` column flexes to fill
+remaining width; the others have fixed widths you can adjust by dragging their
+dividers.
+
+### Projects
+
+Asana's public API does **not** expose the web sidebar's curated "Projects"
+list, so `projects` offers three options:
+
+- `"favorites"` — your favorited projects, returned in sidebar order. The
+  closest single-call match to the web sidebar.
+- `"member"` — every (non-archived) project you're a member of. A superset of
+  the sidebar.
+- An explicit **list of project names** — reproduces a curated sidebar exactly.
+  Names are matched case-insensitively against all projects in your workspace
+  and shown in the order you list them.
+
+## Where your data lives
+
+| What | Where |
+| --- | --- |
+| Asana token | macOS Keychain (service `ninjasana`), or `ASANA_ACCESS_TOKEN` |
+| Configuration | `~/.config/ninjasana/config.toml` |
+| UI state (section collapse, column widths) | `~/.config/ninjasana/state.json` |
+
+Your token is never written to the config or state files. Section collapse
+state and resized column widths persist across runs because Asana's API does not
+expose them.
+
+## Running inside herdr
+
+[herdr](https://herdr.dev) embeds any terminal program in a PTY pane, so
+Ninjasana runs inside it like any other mouse-aware TUI — clicks, drags, scroll,
+and the alternate screen all behave. Matching herdr's own stack (Ratatui +
+crossterm) keeps the mouse/escape-sequence handling consistent on both sides of
+the PTY boundary.
+
+## Development
+
+```sh
+cargo build          # debug build
+cargo run            # run it
+cargo test           # unit tests
+cargo clippy         # lints
+cargo run -- login   # pass args through cargo with `--`
+```
+
+The code is small and layered:
+
+- `cli.rs` — argument parsing and task-URL handling.
+- `commands.rs` — the non-TUI `login` / `logout` commands.
+- `config.rs` / `credentials.rs` — token resolution and Keychain storage.
+- `settings.rs` — the config file (columns, project source).
+- `state.rs` — persisted UI state (collapse, column widths).
+- `asana.rs` — the async Asana REST client (`reqwest` + `serde`).
+- `event.rs` — the async event bus (keyboard, mouse, ticks, API results).
+- `app.rs` — application state, the event loop, and mouse hit-testing.
+- `ui.rs` — Ratatui rendering; every clickable element registers its rectangle.
+
+## Why Rust + Ratatui
+
+The product is bespoke mouse interaction, so we want to own the screen geometry.
+[Ratatui](https://ratatui.rs) is immediate-mode: every frame we compute the
+layout rectangles and draw to them, and that same set of rectangles is what we
+hit-test clicks, drags, and resizes against — one coordinate system, no separate
+retained widget tree to keep in sync. It's also the stack herdr is built on.
+
+The Asana API is reached directly over REST (`reqwest` + `serde`); Asana ships
+no official Rust SDK, and its responses map cleanly onto `serde` types.
 
 ## License
 
