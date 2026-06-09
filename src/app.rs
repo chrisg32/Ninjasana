@@ -231,7 +231,7 @@ impl App {
         if let Some(client) = self.client.clone() {
             self.status = "Connecting to Asana…".into();
             let tx = self.tx.clone();
-            let source = self.project_source;
+            let source = self.project_source.clone();
             tokio::spawn(async move {
                 let update = match bootstrap(&client, source).await {
                     Ok((user, workspace, projects)) => AsanaUpdate::Bootstrap {
@@ -805,6 +805,24 @@ async fn bootstrap(
     let projects = match source {
         ProjectSource::Favorites => client.favorite_projects(&workspace.gid).await?,
         ProjectSource::Member => client.member_projects(&workspace.gid, &user.gid).await?,
+        ProjectSource::Explicit(names) => {
+            let all = client.all_projects(&workspace.gid).await?;
+            order_by_names(all, &names)
+        }
     };
     Ok((user, workspace, projects))
+}
+
+/// Pick projects matching `names` (case-insensitive), in the order `names`
+/// lists them. Names with no match are skipped.
+fn order_by_names(all: Vec<Project>, names: &[String]) -> Vec<Project> {
+    names
+        .iter()
+        .filter_map(|name| {
+            let want = name.trim().to_lowercase();
+            all.iter()
+                .find(|p| p.name.trim().to_lowercase() == want)
+                .cloned()
+        })
+        .collect()
 }

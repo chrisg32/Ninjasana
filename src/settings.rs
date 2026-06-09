@@ -91,12 +91,15 @@ impl Column {
 }
 
 /// Which projects to show in the navigation pane.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ProjectSource {
     /// Favorited projects, in sidebar order (closest to the web sidebar).
     Favorites,
     /// All projects the user is a member of.
     Member,
+    /// An explicit, ordered list of project names (the only way to reproduce
+    /// the web sidebar's curated "Projects" list exactly).
+    Explicit(Vec<String>),
 }
 
 impl ProjectSource {
@@ -107,6 +110,14 @@ impl ProjectSource {
             _ => None,
         }
     }
+}
+
+/// The `projects` config value: either a mode string or an explicit name list.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawProjects {
+    Mode(String),
+    List(Vec<String>),
 }
 
 pub struct Settings {
@@ -122,11 +133,15 @@ impl Settings {
             .map(|r| parse_columns(&r.columns))
             .filter(|c| !c.is_empty())
             .unwrap_or_else(default_columns);
-        let projects = raw
-            .as_ref()
-            .and_then(|r| r.projects.as_deref())
-            .and_then(ProjectSource::parse)
-            .unwrap_or(ProjectSource::Favorites);
+        let projects = match raw.as_ref().and_then(|r| r.projects.as_ref()) {
+            Some(RawProjects::List(names)) if !names.is_empty() => {
+                ProjectSource::Explicit(names.clone())
+            }
+            Some(RawProjects::Mode(mode)) => {
+                ProjectSource::parse(mode).unwrap_or(ProjectSource::Favorites)
+            }
+            _ => ProjectSource::Favorites,
+        };
         Settings { columns, projects }
     }
 }
@@ -136,7 +151,7 @@ struct RawConfig {
     #[serde(default)]
     columns: Vec<String>,
     #[serde(default)]
-    projects: Option<String>,
+    projects: Option<RawProjects>,
 }
 
 /// Read and parse the config file; seed a default on first run.
@@ -174,9 +189,11 @@ const DEFAULT_TOML: &str = "\
 #   \"custom:Dev Status v2\"
 columns = [\"name\", \"due_date\", \"assignee\", \"projects\", \"tags\"]
 
-# Which projects appear in the navigation pane:
+# Which projects appear in the navigation pane. Either a mode:
 #   \"favorites\" — your favorited projects, in sidebar order (default)
 #   \"member\"    — every project you're a member of
+# ...or an explicit, ordered list of project names to show exactly those:
+#   projects = [\"ISMS\", \"Sprint - Maximilian\", \"Software Department\"]
 projects = \"favorites\"
 ";
 

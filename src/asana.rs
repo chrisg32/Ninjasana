@@ -307,6 +307,21 @@ impl Client {
         .await
     }
 
+    /// Every (non-archived) project in the workspace, by name. Used to resolve
+    /// an explicit, name-based project list from config.
+    pub async fn all_projects(&self, workspace_gid: &str) -> Result<Vec<Project>> {
+        self.get_all(
+            "projects",
+            &[
+                ("workspace", workspace_gid),
+                ("archived", "false"),
+                ("limit", "100"),
+                ("opt_fields", "name"),
+            ],
+        )
+        .await
+    }
+
     /// Every (non-archived) project in the workspace that the user is a member
     /// of. A superset of the web sidebar — membership ≠ sidebar presence.
     pub async fn member_projects(&self, workspace_gid: &str, user_gid: &str) -> Result<Vec<Project>> {

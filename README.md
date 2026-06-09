@@ -51,9 +51,11 @@ and their order:
 # Custom fields: "custom:<Asana field name>", e.g. "custom:Dev Status v2"
 columns = ["name", "due_date", "custom:Dev Status v2", "tags", "projects"]
 
-# Which projects appear in the nav pane:
+# Which projects appear in the nav pane. Either a mode...
 #   "favorites" — your favorited projects, in sidebar order (default)
 #   "member"    — every project you're a member of
+# ...or an explicit, ordered list of project names:
+#   projects = ["ISMS", "Sprint - Maximilian", "Software Department"]
 projects = "favorites"
 ```
 
@@ -62,8 +64,10 @@ in the binary. Section collapse/expand state is remembered between runs (stored
 in `~/.config/ninjasana/state.json`).
 
 > Note: Asana's public API doesn't expose the web sidebar's curated "Projects"
-> list directly. `"favorites"` returns your favorited projects in sidebar order
-> (the closest match); `"member"` returns the full set you belong to.
+> list directly. `"favorites"` returns your favorited projects in sidebar order,
+> `"member"` returns the full set you belong to, and an explicit name list lets
+> you reproduce a curated sidebar exactly (names are matched case-insensitively,
+> in the order given).
 
 ## Status
 
