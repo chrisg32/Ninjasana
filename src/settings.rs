@@ -90,24 +90,44 @@ impl Column {
     }
 }
 
+/// Which projects to show in the navigation pane.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSource {
+    /// Favorited projects, in sidebar order (closest to the web sidebar).
+    Favorites,
+    /// All projects the user is a member of.
+    Member,
+}
+
+impl ProjectSource {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "favorites" | "favorite" | "starred" => Some(ProjectSource::Favorites),
+            "member" | "members" | "all" => Some(ProjectSource::Member),
+            _ => None,
+        }
+    }
+}
+
 pub struct Settings {
     pub columns: Vec<Column>,
+    pub projects: ProjectSource,
 }
 
 impl Settings {
     pub fn load() -> Self {
-        let columns = match config_path() {
-            Some(path) => match fs::read_to_string(&path) {
-                Ok(text) => parse(&text).unwrap_or_else(default_columns),
-                // Missing (or unreadable): seed a default the user can edit.
-                Err(_) => {
-                    let _ = write_default(&path);
-                    default_columns()
-                }
-            },
-            None => default_columns(),
-        };
-        Settings { columns }
+        let raw = read_raw();
+        let columns = raw
+            .as_ref()
+            .map(|r| parse_columns(&r.columns))
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(default_columns);
+        let projects = raw
+            .as_ref()
+            .and_then(|r| r.projects.as_deref())
+            .and_then(ProjectSource::parse)
+            .unwrap_or(ProjectSource::Favorites);
+        Settings { columns, projects }
     }
 }
 
@@ -115,12 +135,24 @@ impl Settings {
 struct RawConfig {
     #[serde(default)]
     columns: Vec<String>,
+    #[serde(default)]
+    projects: Option<String>,
 }
 
-fn parse(text: &str) -> Option<Vec<Column>> {
-    let raw: RawConfig = toml::from_str(text).ok()?;
-    let columns: Vec<Column> = raw.columns.iter().filter_map(|c| Column::parse(c)).collect();
-    (!columns.is_empty()).then_some(columns)
+/// Read and parse the config file; seed a default on first run.
+fn read_raw() -> Option<RawConfig> {
+    let path = config_path()?;
+    match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).ok(),
+        Err(_) => {
+            let _ = write_default(&path);
+            None
+        }
+    }
+}
+
+fn parse_columns(tokens: &[String]) -> Vec<Column> {
+    tokens.iter().filter_map(|c| Column::parse(c)).collect()
 }
 
 fn default_columns() -> Vec<Column> {
@@ -141,6 +173,11 @@ const DEFAULT_TOML: &str = "\
 # Custom fields use a \"custom:\" prefix with the exact Asana field name, e.g.:
 #   \"custom:Dev Status v2\"
 columns = [\"name\", \"due_date\", \"assignee\", \"projects\", \"tags\"]
+
+# Which projects appear in the navigation pane:
+#   \"favorites\" — your favorited projects, in sidebar order (default)
+#   \"member\"    — every project you're a member of
+projects = \"favorites\"
 ";
 
 fn config_path() -> Option<PathBuf> {

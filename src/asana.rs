@@ -48,6 +48,19 @@ struct DataEnvelope<T> {
     data: T,
 }
 
+/// A paginated list response: `{ "data": [...], "next_page": { "offset": .. } }`.
+#[derive(Debug, Deserialize)]
+struct Page<T> {
+    data: Vec<T>,
+    #[serde(default)]
+    next_page: Option<NextPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NextPage {
+    offset: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
     pub gid: String,
@@ -236,6 +249,40 @@ impl Client {
         Ok(envelope.data)
     }
 
+    /// Issue paginated GETs, following `next_page` until exhausted.
+    async fn get_all<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        let mut offset: Option<String> = None;
+        loop {
+            let mut q: Vec<(&str, &str)> = query.to_vec();
+            if let Some(o) = &offset {
+                q.push(("offset", o));
+            }
+            let page: Page<T> = self
+                .http
+                .get(self.url(path, &q))
+                .bearer_auth(&self.config.token)
+                .send()
+                .await
+                .context("sending request to Asana")?
+                .error_for_status()
+                .context("Asana returned an error status")?
+                .json()
+                .await
+                .context("decoding the Asana response")?;
+            out.extend(page.data);
+            match page.next_page.and_then(|n| n.offset) {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch the authenticated user. Doubles as a connectivity/auth check.
     pub async fn me(&self) -> Result<User> {
         self.get("users/me", &[]).await
@@ -245,11 +292,26 @@ impl Client {
         self.get("workspaces", &[("limit", "100")]).await
     }
 
-    /// Projects in the workspace that the user is a member of — mirrors the
-    /// "Projects" section of Asana's web sidebar.
+    /// The user's favorited projects, in sidebar order — the closest public-API
+    /// match to Asana's web "Projects"/"Starred" sidebar. Current user only.
+    pub async fn favorite_projects(&self, workspace_gid: &str) -> Result<Vec<Project>> {
+        self.get_all(
+            "users/me/favorites",
+            &[
+                ("workspace", workspace_gid),
+                ("resource_type", "project"),
+                ("limit", "100"),
+                ("opt_fields", "name"),
+            ],
+        )
+        .await
+    }
+
+    /// Every (non-archived) project in the workspace that the user is a member
+    /// of. A superset of the web sidebar — membership ≠ sidebar presence.
     pub async fn member_projects(&self, workspace_gid: &str, user_gid: &str) -> Result<Vec<Project>> {
         let projects: Vec<Project> = self
-            .get(
+            .get_all(
                 "projects",
                 &[
                     ("workspace", workspace_gid),

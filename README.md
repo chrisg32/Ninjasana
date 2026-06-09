@@ -50,10 +50,20 @@ and their order:
 # Built-ins: "name", "due_date", "assignee", "projects", "tags", "completed"
 # Custom fields: "custom:<Asana field name>", e.g. "custom:Dev Status v2"
 columns = ["name", "due_date", "custom:Dev Status v2", "tags", "projects"]
+
+# Which projects appear in the nav pane:
+#   "favorites" — your favorited projects, in sidebar order (default)
+#   "member"    — every project you're a member of
+projects = "favorites"
 ```
 
 Custom fields are referenced by name so nothing workspace-specific is hardcoded
-in the binary.
+in the binary. Section collapse/expand state is remembered between runs (stored
+in `~/.config/ninjasana/state.json`).
+
+> Note: Asana's public API doesn't expose the web sidebar's curated "Projects"
+> list directly. `"favorites"` returns your favorited projects in sidebar order
+> (the closest match); `"member"` returns the full set you belong to.
 
 ## Status
 

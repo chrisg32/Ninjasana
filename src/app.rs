@@ -18,7 +18,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Task, TaskDetail, TaskListKey};
 use crate::event::{Event, EventBus};
-use crate::settings::Column;
+use crate::settings::{Column, ProjectSource};
+use crate::state::CollapseStore;
 use crate::tui::Tui;
 use crate::ui;
 
@@ -79,13 +80,11 @@ impl ZoneMap {
             .map(|(zone, _)| zone.clone())
     }
 
-    /// Resolve a drag's cursor position to a drop target `(section, index to
-    /// insert before)`: a task row inserts before that row; a section header
-    /// inserts at the top of that section.
-    pub fn drop_target(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+    /// Resolve a drag's cursor position to a drop target.
+    pub fn drop_target(&self, column: u16, row: u16) -> Option<DropTarget> {
         match self.hit(column, row)? {
-            Zone::TaskRow(si, ti) => Some((si, ti)),
-            Zone::Section(si) => Some((si, 0)),
+            Zone::TaskRow(si, ti) => Some(DropTarget::Task(si, ti)),
+            Zone::Section(si) => Some(DropTarget::SectionTop(si)),
             _ => None,
         }
     }
@@ -99,12 +98,20 @@ pub struct SectionView {
     pub collapsed: bool,
 }
 
-/// In-progress drag of a task row. `over` is the drop target as
-/// `(section index, index to insert before)`.
+/// Where a drag is hovering.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DropTarget {
+    /// Over a task row `(section, task)`.
+    Task(usize, usize),
+    /// Over a section header — drop at the top of that section.
+    SectionTop(usize),
+}
+
+/// In-progress drag of a task row.
 #[derive(Clone, Copy)]
 pub struct Drag {
     pub from: (usize, usize),
-    pub over: Option<(usize, usize)>,
+    pub over: Option<DropTarget>,
     pub moved: bool,
 }
 
@@ -138,15 +145,24 @@ pub struct App {
 
     /// Columns shown in the task table, from the user's config.
     pub columns: Vec<Column>,
+    /// Which projects to list in the nav pane.
+    project_source: ProjectSource,
     /// In-progress drag of a task row, if any.
     pub drag: Option<Drag>,
+    /// Persisted section-collapse state.
+    collapse: CollapseStore,
 
     pub status: String,
     pub zones: ZoneMap,
 }
 
 impl App {
-    pub fn new(mode: AppMode, client: Option<Client>, columns: Vec<Column>) -> Self {
+    pub fn new(
+        mode: AppMode,
+        client: Option<Client>,
+        columns: Vec<Column>,
+        project_source: ProjectSource,
+    ) -> Self {
         // A dummy sender; replaced with the real one in `run`.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let offline = client.is_none();
@@ -167,7 +183,9 @@ impl App {
             detail: None,
             detail_loading: false,
             columns,
+            project_source,
             drag: None,
+            collapse: CollapseStore::load(),
             status: String::new(),
             zones: ZoneMap::default(),
         };
@@ -213,8 +231,9 @@ impl App {
         if let Some(client) = self.client.clone() {
             self.status = "Connecting to Asana…".into();
             let tx = self.tx.clone();
+            let source = self.project_source;
             tokio::spawn(async move {
-                let update = match bootstrap(&client).await {
+                let update = match bootstrap(&client, source).await {
                     Ok((user, workspace, projects)) => AsanaUpdate::Bootstrap {
                         user,
                         workspace,
@@ -295,8 +314,12 @@ impl App {
         match zone {
             Zone::Nav(nav) => self.select_nav(nav),
             Zone::Section(index) => {
-                if let Some(section) = self.sections.get_mut(index) {
-                    section.collapsed = !section.collapsed;
+                if index < self.sections.len() {
+                    let collapsed = !self.sections[index].collapsed;
+                    self.sections[index].collapsed = collapsed;
+                    let nav = self.nav_key();
+                    let key = section_key(&self.sections[index]);
+                    self.collapse.set(&nav, &key, collapsed);
                 }
             }
             Zone::TaskRow(section, task) => self.select_task(section, task),
@@ -394,28 +417,45 @@ impl App {
 
     // ---- drag-to-reorder ----------------------------------------------
 
-    /// Move the task at `from` to just before `to` (`(section, index)`),
-    /// updating the local model immediately and then persisting.
-    fn apply_reorder(&mut self, from: (usize, usize), to: (usize, usize)) {
+    /// Move the task at `from` to the drop target, updating the local model
+    /// immediately and then persisting. Dropping onto a row that sits *below*
+    /// the dragged task inserts *after* it (so dragging down lands where you'd
+    /// expect); dropping above inserts before; dropping on a header goes to the
+    /// top of that section.
+    fn apply_reorder(&mut self, from: (usize, usize), target: DropTarget) {
         let (fs, ft) = from;
-        let (ts, mut tb) = to;
-        if fs >= self.sections.len()
-            || ft >= self.sections[fs].tasks.len()
-            || ts >= self.sections.len()
-        {
+        if fs >= self.sections.len() || ft >= self.sections[fs].tasks.len() {
             return;
         }
-        // Dropping onto itself (or the slot just after it) changes nothing.
-        if fs == ts && (tb == ft || tb == ft + 1) {
+
+        let (ts, raw) = match target {
+            DropTarget::SectionTop(s) => (s, 0),
+            DropTarget::Task(s, h) => {
+                let dragging_down = matches!(
+                    (self.row_index_of((fs, ft)), self.row_index_of((s, h))),
+                    (Some(src), Some(tgt)) if tgt > src
+                );
+                (s, if dragging_down { h + 1 } else { h })
+            }
+        };
+        if ts >= self.sections.len() {
             return;
         }
 
         let task = self.sections[fs].tasks.remove(ft);
         // Removing an earlier index in the same section shifts the target left.
+        let mut tb = raw;
         if fs == ts && tb > ft {
             tb -= 1;
         }
         tb = tb.min(self.sections[ts].tasks.len());
+
+        // True no-op: same section, same resulting slot.
+        if fs == ts && tb == ft {
+            self.sections[fs].tasks.insert(ft, task);
+            return;
+        }
+
         self.sections[ts].tasks.insert(tb, task);
         self.selected = Some((ts, tb));
         self.ensure_visible();
@@ -529,18 +569,34 @@ impl App {
     // ---- helpers -------------------------------------------------------
 
     fn set_sections(&mut self, sections: Vec<Section>) {
+        let nav = self.nav_key();
         self.sections = sections
             .into_iter()
-            .map(|s| SectionView {
-                gid: s.gid,
-                name: s.name,
-                tasks: s.tasks,
-                collapsed: false,
+            .map(|s| {
+                let collapsed = self.collapse.is_collapsed(&nav, &section_key_parts(&s.gid, &s.name));
+                SectionView {
+                    gid: s.gid,
+                    name: s.name,
+                    tasks: s.tasks,
+                    collapsed,
+                }
             })
             .collect();
         self.scroll = 0;
         self.selected = None;
         self.detail = None;
+    }
+
+    /// Stable per-list key for the collapse store.
+    fn nav_key(&self) -> String {
+        match self.nav {
+            Nav::MyTasks => "my_tasks".to_string(),
+            Nav::Project(i) => self
+                .projects
+                .get(i)
+                .map(|p| format!("project:{}", p.gid))
+                .unwrap_or_else(|| "project:?".to_string()),
+        }
     }
 
     /// Flattened `(section, task)` indices that are currently visible (i.e. not
@@ -619,6 +675,19 @@ impl App {
         self.set_sections(demo_sections_for(Nav::MyTasks, &self.projects));
         self.status =
             "Demo mode — no token set. Run `ninjasana login`. Click around; q to quit.".into();
+    }
+}
+
+/// Stable key for a section within its list (prefers the gid; falls back to a
+/// name-derived key for synthetic sections).
+fn section_key(section: &SectionView) -> String {
+    section_key_parts(&section.gid, &section.name)
+}
+
+fn section_key_parts(gid: &Option<String>, name: &str) -> String {
+    match gid {
+        Some(g) => g.clone(),
+        None => format!("name:{name}"),
     }
 }
 
@@ -724,6 +793,7 @@ fn demo_detail(task: &Task) -> TaskDetail {
 
 async fn bootstrap(
     client: &Client,
+    source: ProjectSource,
 ) -> Result<(crate::asana::User, crate::asana::Workspace, Vec<Project>)> {
     let user = client.me().await?;
     let workspace = client
@@ -732,6 +802,9 @@ async fn bootstrap(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("your account has no workspaces"))?;
-    let projects = client.member_projects(&workspace.gid, &user.gid).await?;
+    let projects = match source {
+        ProjectSource::Favorites => client.favorite_projects(&workspace.gid).await?,
+        ProjectSource::Member => client.member_projects(&workspace.gid, &user.gid).await?,
+    };
     Ok((user, workspace, projects))
 }

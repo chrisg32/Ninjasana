@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 
-use crate::app::{App, AppMode, Nav, Zone};
+use crate::app::{App, AppMode, DropTarget, Nav, Zone};
 use crate::settings::Column;
 
 const ACCENT: Color = Color::Cyan;
@@ -237,7 +237,7 @@ fn render_task_row(
     let selected = app.selected == Some((si, ti));
     let drag = app.drag;
     let is_grabbed = drag.is_some_and(|d| d.moved && d.from == (si, ti));
-    let is_drop = drag.is_some_and(|d| d.moved && d.over == Some((si, ti)));
+    let is_drop = drag.is_some_and(|d| d.moved && d.over == Some(DropTarget::Task(si, ti)));
 
     let mark = if is_grabbed {
         "≡"

@@ -12,6 +12,7 @@ mod config;
 mod credentials;
 mod event;
 mod settings;
+mod state;
 mod tui;
 mod ui;
 
@@ -46,10 +47,12 @@ async fn main() -> Result<()> {
 
     // A token (env or keychain) enables live data; absence means demo mode.
     let client = Config::load().map(Client::new);
-    let columns = Settings::load().columns;
+    let settings = Settings::load();
 
     let mut terminal = tui::init()?;
-    let result = App::new(mode, client, columns).run(&mut terminal).await;
+    let result = App::new(mode, client, settings.columns, settings.projects)
+        .run(&mut terminal)
+        .await;
     tui::restore()?;
     result
 }
