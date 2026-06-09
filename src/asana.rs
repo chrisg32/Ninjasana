@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 
 use crate::config::Config;
 
@@ -117,7 +118,7 @@ pub struct Task {
     pub assignee: Option<Named>,
     /// Present on My Tasks results: the section within the user's task list.
     #[serde(default)]
-    pub assignee_section: Option<Named>,
+    pub assignee_section: Option<SectionRef>,
     #[serde(default)]
     pub memberships: Vec<Membership>,
     #[serde(default)]
@@ -155,9 +156,12 @@ impl Task {
     }
 }
 
-/// A named group of tasks, in display order.
+/// A named group of tasks, in display order. `gid` is the section's id when one
+/// exists (project sections, and My Tasks assignee-sections) — used to persist
+/// moves. It is `None` for the synthetic "(No section)" bucket.
 #[derive(Debug, Clone)]
 pub struct Section {
+    pub gid: Option<String>,
     pub name: String,
     pub tasks: Vec<Task>,
 }
@@ -291,7 +295,11 @@ impl Client {
             } else {
                 section.name
             };
-            out.push(Section { name, tasks });
+            out.push(Section {
+                gid: Some(section.gid),
+                name,
+                tasks,
+            });
         }
         Ok(out)
     }
@@ -338,32 +346,87 @@ impl Client {
         )
         .await
     }
+
+    /// Send a body to `path` with the given method and check the status.
+    async fn write(&self, method: reqwest::Method, path: &str, body: Value) -> Result<()> {
+        self.http
+            .request(method, self.url(path, &[]))
+            .bearer_auth(&self.config.token)
+            .json(&body)
+            .send()
+            .await
+            .context("sending request to Asana")?
+            .error_for_status()
+            .context("Asana returned an error status")?;
+        Ok(())
+    }
+
+    /// Move `task_gid` within a project section, positioning it before
+    /// `insert_before` (or at the end when `None`). Also moves the task into the
+    /// section if it wasn't already there.
+    pub async fn move_task_in_section(
+        &self,
+        section_gid: &str,
+        task_gid: &str,
+        insert_before: Option<&str>,
+    ) -> Result<()> {
+        let mut data = json!({ "task": task_gid });
+        if let Some(before) = insert_before {
+            data["insert_before"] = json!(before);
+        }
+        self.write(
+            reqwest::Method::POST,
+            &format!("sections/{section_gid}/addTask"),
+            json!({ "data": data }),
+        )
+        .await
+    }
+
+    /// Move a task to a different My Tasks (assignee) section.
+    pub async fn set_assignee_section(&self, task_gid: &str, section_gid: &str) -> Result<()> {
+        self.write(
+            reqwest::Method::PUT,
+            &format!("tasks/{task_gid}"),
+            json!({ "data": { "assignee_section": section_gid } }),
+        )
+        .await
+    }
 }
 
 /// Group My Tasks by their assignee-section, preserving the order in which the
-/// sections first appear (which matches the user's My Tasks ordering).
+/// sections first appear (which matches the user's My Tasks ordering). Keyed by
+/// section gid so renamed/duplicate names stay distinct.
 fn group_by_assignee_section(tasks: Vec<Task>) -> Vec<Section> {
+    // Stable insertion order of section keys.
     let mut order: Vec<String> = Vec::new();
+    let mut meta: HashMap<String, (Option<String>, String)> = HashMap::new();
     let mut groups: HashMap<String, Vec<Task>> = HashMap::new();
 
     for task in tasks {
-        let name = task
-            .assignee_section
-            .as_ref()
-            .map(|s| s.name.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| NO_SECTION.to_string());
-        if !groups.contains_key(&name) {
-            order.push(name.clone());
+        let (key, gid, name) = match &task.assignee_section {
+            Some(section) => {
+                let name = if section.name.is_empty() {
+                    NO_SECTION.to_string()
+                } else {
+                    section.name.clone()
+                };
+                (section.gid.clone(), Some(section.gid.clone()), name)
+            }
+            None => (NO_SECTION.to_string(), None, NO_SECTION.to_string()),
+        };
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+            meta.insert(key.clone(), (gid, name));
         }
-        groups.entry(name).or_default().push(task);
+        groups.entry(key).or_default().push(task);
     }
 
     order
         .into_iter()
-        .map(|name| {
-            let tasks = groups.remove(&name).unwrap_or_default();
-            Section { name, tasks }
+        .map(|key| {
+            let tasks = groups.remove(&key).unwrap_or_default();
+            let (gid, name) = meta.remove(&key).unwrap_or((None, NO_SECTION.to_string()));
+            Section { gid, name, tasks }
         })
         .collect()
 }

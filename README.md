@@ -34,10 +34,26 @@ The full view mirrors how Asana looks in the browser:
 - **Left** — navigation: *My Tasks* pinned on top, then the projects you're a
   member of.
 - **Middle** — the selected list's tasks, grouped into collapsible **sections**
-  in Asana's order, shown as a table: Name · Due Date · Dev Status v2 · Tags ·
-  Projects. Tasks show an open circle (`○`) and **cannot be completed by
-  clicking** — clicking a row only opens its detail.
+  in Asana's order, shown as a configurable table (see [Configuration](#configuration)).
+  **Drag a row** to reorder it within or across sections. Tasks show an open
+  circle (`○`) and **cannot be completed by clicking** — a row click only opens
+  its detail. Tags and status-style custom fields are color-coded.
 - **Right** — task detail, shown only once a task is selected.
+
+## Configuration
+
+Columns are read from `~/.config/ninjasana/config.toml` (honoring
+`XDG_CONFIG_HOME`); a generic default is written on first run. Set the columns
+and their order:
+
+```toml
+# Built-ins: "name", "due_date", "assignee", "projects", "tags", "completed"
+# Custom fields: "custom:<Asana field name>", e.g. "custom:Dev Status v2"
+columns = ["name", "due_date", "custom:Dev Status v2", "tags", "projects"]
+```
+
+Custom fields are referenced by name so nothing workspace-specific is hardcoded
+in the binary.
 
 ## Status
 
@@ -52,8 +68,7 @@ Working today:
   `ZoneMap` that hit-tests clicks against the same rectangles we lay out.
 - An offline **demo mode** when no token is set, so you can click around.
 
-Next up: browser OAuth login (loopback + PKCE), drag-to-reorder, and right-click
-context menus.
+Next up: right-click context menus and a few display refinements.
 
 ## Getting started
 
@@ -73,6 +88,7 @@ cp .env.example .env      # then put an Asana PAT in .env
 | Click a nav entry | Switch list (My Tasks / a project) |
 | Click a section header | Collapse / expand the section |
 | Click a task row | Open its detail pane (never completes the task) |
+| **Drag a task row** | Reorder within / across sections |
 | Scroll wheel | Scroll the task list |
 | ↑/↓ or `j`/`k` | Move task selection |
 | Click **Quit** / `q` / `Esc` | Exit |

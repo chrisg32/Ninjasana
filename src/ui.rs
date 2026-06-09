@@ -1,6 +1,7 @@
 //! Rendering. Every clickable element registers its rectangle with the app's
 //! [`ZoneMap`](crate::app::ZoneMap) as it is drawn, so the click handler and the
-//! renderer share one set of coordinates.
+//! renderer share one set of coordinates. Columns are driven by the user's
+//! config ([`crate::settings::Column`]), not hardcoded.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -9,39 +10,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 
 use crate::app::{App, AppMode, Nav, Zone};
+use crate::settings::Column;
 
 const ACCENT: Color = Color::Cyan;
-const DEV_STATUS_FIELD: &str = "Dev Status v2";
 
 /// One row of the middle pane: a section header or a task within a section.
 enum Row {
     Header(usize),
     Task(usize, usize),
-}
-
-/// Fixed widths for the metadata columns; Name flexes to fill the rest.
-struct Columns {
-    name: usize,
-    due: usize,
-    dev: usize,
-    tags: usize,
-    projects: usize,
-}
-
-impl Columns {
-    fn for_width(total: usize) -> Self {
-        let (due, dev, tags, projects) = (10, 16, 18, 22);
-        // 2 cols for the status mark + 5 single-space separators.
-        let fixed = 2 + 5 + due + dev + tags + projects;
-        let name = total.saturating_sub(fixed).max(12);
-        Self {
-            name,
-            due,
-            dev,
-            tags,
-            projects,
-        }
-    }
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -154,7 +130,10 @@ fn render_nav(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Style::new()
         };
-        frame.render_widget(Paragraph::new(fit(&format!(" {label}"), inner.width as usize)).style(style), rect);
+        frame.render_widget(
+            Paragraph::new(fit(&format!(" {label}"), inner.width as usize)).style(style),
+            rect,
+        );
         app.zones.push(Zone::Nav(nav), rect);
     }
 }
@@ -170,17 +149,17 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let cols = Columns::for_width(inner.width as usize);
+    // Column widths: fixed columns keep their width; Name flexes to fill. The
+    // leading 2 columns are reserved for the status mark ("○ ").
+    let widths = column_widths(&app.columns, (inner.width as usize).saturating_sub(2));
 
-    // Column header row.
-    let header = format!(
-        "  {} {} {} {} {}",
-        fit("Name", cols.name),
-        fit("Due Date", cols.due),
-        fit(DEV_STATUS_FIELD, cols.dev),
-        fit("Tags", cols.tags),
-        fit("Projects", cols.projects),
-    );
+    let mut header = String::from("  ");
+    for (i, (column, width)) in app.columns.iter().zip(&widths).enumerate() {
+        if i > 0 {
+            header.push(' ');
+        }
+        header.push_str(&fit(&column.title(), *width));
+    }
     frame.render_widget(
         Paragraph::new(header).style(Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
         Rect {
@@ -205,7 +184,6 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Flatten sections + visible tasks into virtual rows.
     let mut rows: Vec<Row> = Vec::new();
     for (si, section) in app.sections.iter().enumerate() {
         rows.push(Row::Header(si));
@@ -226,7 +204,7 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         match *row {
             Row::Header(si) => render_section_header(frame, app, si, rect),
-            Row::Task(si, ti) => render_task_row(frame, app, si, ti, &cols, rect),
+            Row::Task(si, ti) => render_task_row(frame, app, si, ti, &widths, rect),
         }
     }
 }
@@ -247,39 +225,73 @@ fn render_section_header(frame: &mut Frame, app: &mut App, si: usize, rect: Rect
     app.zones.push(Zone::Section(si), rect);
 }
 
-fn render_task_row(frame: &mut Frame, app: &mut App, si: usize, ti: usize, cols: &Columns, rect: Rect) {
-    let task = &app.sections[si].tasks[ti];
+fn render_task_row(
+    frame: &mut Frame,
+    app: &mut App,
+    si: usize,
+    ti: usize,
+    widths: &[usize],
+    rect: Rect,
+) {
+    let task = app.sections[si].tasks[ti].clone();
     let selected = app.selected == Some((si, ti));
+    let drag = app.drag;
+    let is_grabbed = drag.is_some_and(|d| d.moved && d.from == (si, ti));
+    let is_drop = drag.is_some_and(|d| d.moved && d.over == Some((si, ti)));
 
-    let mark = if task.completed { "✔" } else { "○" };
-    let due = task.due_on.clone().unwrap_or_else(|| "—".to_string());
-    let dev = task.custom_field(DEV_STATUS_FIELD).unwrap_or_default();
-    let tags = task.tag_names().join(", ");
-    let projects = task.project_names().join(", ");
-
-    let line = format!(
-        "{mark} {} {} {} {} {}",
-        fit(&task.name, cols.name),
-        fit(&due, cols.due),
-        fit(&dev, cols.dev),
-        fit(&tags, cols.tags),
-        fit(&projects, cols.projects),
-    );
-
-    let style = if selected {
-        Style::new()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+    let mark = if is_grabbed {
+        "≡"
     } else if task.completed {
-        Style::new()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::CROSSED_OUT)
+        "✔"
     } else {
-        Style::new()
+        "○"
     };
 
-    frame.render_widget(Paragraph::new(line).style(style), rect);
+    // Special rows (selected / completed / mid-drag) render with one uniform
+    // style; ordinary rows get per-column color coding.
+    if selected || task.completed || is_grabbed || is_drop {
+        let style = if is_drop {
+            Style::new()
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED)
+        } else if is_grabbed {
+            Style::new()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC)
+        } else if selected {
+            Style::new()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::CROSSED_OUT)
+        };
+        let mut line = format!("{mark} ");
+        for (i, (column, width)) in app.columns.iter().zip(widths).enumerate() {
+            if i > 0 {
+                line.push(' ');
+            }
+            line.push_str(&fit(&column.value(&task), *width));
+        }
+        frame.render_widget(Paragraph::new(line).style(style), rect);
+    } else {
+        let mut spans: Vec<Span> = vec![Span::styled(
+            format!("{mark} "),
+            Style::new().fg(Color::DarkGray),
+        )];
+        for (i, (column, width)) in app.columns.iter().zip(widths).enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let value = column.value(&task);
+            spans.push(Span::styled(fit(&value, *width), column_style(column, &value)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+    }
+
     app.zones.push(Zone::TaskRow(si, ti), rect);
 }
 
@@ -342,7 +354,9 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints = match app.mode {
-        AppMode::Full => " click row: open · click section: collapse · scroll · ↑/↓: move · q: quit ",
+        AppMode::Full => {
+            " click: open · drag: reorder · click section: collapse · scroll · ↑/↓: move · q: quit "
+        }
         AppMode::TaskDetail(_) => " q: quit ",
     };
     let line = Line::from(vec![
@@ -354,6 +368,64 @@ fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(hints, Style::new().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Per-column foreground styling. Tags get a tag color; custom fields (e.g.
+/// "Dev Status v2") are colored like a status pill by keyword; metadata is
+/// dimmed; Name keeps the default.
+fn column_style(column: &Column, value: &str) -> Style {
+    match column {
+        Column::Name => Style::new(),
+        Column::Tags => Style::new().fg(Color::Magenta),
+        Column::Completed => Style::new().fg(Color::Green),
+        Column::Custom(_) => Style::new()
+            .fg(status_color(value))
+            .add_modifier(Modifier::BOLD),
+        _ => Style::new().fg(Color::Gray),
+    }
+}
+
+/// Map a status-like value to a color, mirroring Asana's pill palette.
+fn status_color(value: &str) -> Color {
+    let v = value.to_lowercase();
+    if v.is_empty() {
+        Color::DarkGray
+    } else if ["done", "complete", "merged", "closed", "shipped"]
+        .iter()
+        .any(|k| v.contains(k))
+    {
+        Color::Green
+    } else if ["review", "qa", "verify", "test"].iter().any(|k| v.contains(k)) {
+        Color::Magenta
+    } else if ["progress", "develop", "doing", "active"]
+        .iter()
+        .any(|k| v.contains(k))
+    {
+        Color::Cyan
+    } else if ["block", "hold", "waiting", "stuck"].iter().any(|k| v.contains(k)) {
+        Color::Red
+    } else if ["backlog", "todo", "to do", "new", "ready", "triage"]
+        .iter()
+        .any(|k| v.contains(k))
+    {
+        Color::Yellow
+    } else {
+        Color::Blue
+    }
+}
+
+/// Distribute `total` columns across `columns`: fixed columns keep their width,
+/// `Name` columns split whatever is left (min 12 each).
+fn column_widths(columns: &[Column], total: usize) -> Vec<usize> {
+    let separators = columns.len().saturating_sub(1);
+    let fixed: usize = columns.iter().filter(|c| !c.is_name()).map(|c| c.width()).sum();
+    let name_count = columns.iter().filter(|c| c.is_name()).count().max(1);
+    let remaining = total.saturating_sub(fixed + separators);
+    let name_width = (remaining / name_count).max(12);
+    columns
+        .iter()
+        .map(|c| if c.is_name() { name_width } else { c.width() })
+        .collect()
 }
 
 /// Truncate (with an ellipsis) or pad `s` to exactly `width` display columns,

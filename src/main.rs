@@ -11,6 +11,7 @@ mod commands;
 mod config;
 mod credentials;
 mod event;
+mod settings;
 mod tui;
 mod ui;
 
@@ -21,6 +22,7 @@ use crate::app::{App, AppMode};
 use crate::asana::Client;
 use crate::cli::{Cli, Command, parse_task_gid};
 use crate::config::Config;
+use crate::settings::Settings;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,9 +46,10 @@ async fn main() -> Result<()> {
 
     // A token (env or keychain) enables live data; absence means demo mode.
     let client = Config::load().map(Client::new);
+    let columns = Settings::load().columns;
 
     let mut terminal = tui::init()?;
-    let result = App::new(mode, client).run(&mut terminal).await;
+    let result = App::new(mode, client, columns).run(&mut terminal).await;
     tui::restore()?;
     result
 }

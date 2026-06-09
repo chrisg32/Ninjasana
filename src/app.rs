@@ -18,6 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Task, TaskDetail, TaskListKey};
 use crate::event::{Event, EventBus};
+use crate::settings::Column;
 use crate::tui::Tui;
 use crate::ui;
 
@@ -77,13 +78,34 @@ impl ZoneMap {
             .find(|(_, rect)| rect.contains(pos))
             .map(|(zone, _)| zone.clone())
     }
+
+    /// Resolve a drag's cursor position to a drop target `(section, index to
+    /// insert before)`: a task row inserts before that row; a section header
+    /// inserts at the top of that section.
+    pub fn drop_target(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        match self.hit(column, row)? {
+            Zone::TaskRow(si, ti) => Some((si, ti)),
+            Zone::Section(si) => Some((si, 0)),
+            _ => None,
+        }
+    }
 }
 
 /// A section plus its UI-only collapsed state.
 pub struct SectionView {
+    pub gid: Option<String>,
     pub name: String,
     pub tasks: Vec<Task>,
     pub collapsed: bool,
+}
+
+/// In-progress drag of a task row. `over` is the drop target as
+/// `(section index, index to insert before)`.
+#[derive(Clone, Copy)]
+pub struct Drag {
+    pub from: (usize, usize),
+    pub over: Option<(usize, usize)>,
+    pub moved: bool,
 }
 
 pub struct App {
@@ -114,12 +136,17 @@ pub struct App {
     pub detail: Option<TaskDetail>,
     pub detail_loading: bool,
 
+    /// Columns shown in the task table, from the user's config.
+    pub columns: Vec<Column>,
+    /// In-progress drag of a task row, if any.
+    pub drag: Option<Drag>,
+
     pub status: String,
     pub zones: ZoneMap,
 }
 
 impl App {
-    pub fn new(mode: AppMode, client: Option<Client>) -> Self {
+    pub fn new(mode: AppMode, client: Option<Client>, columns: Vec<Column>) -> Self {
         // A dummy sender; replaced with the real one in `run`.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let offline = client.is_none();
@@ -139,6 +166,8 @@ impl App {
             viewport_rows: 0,
             detail: None,
             detail_loading: false,
+            columns,
+            drag: None,
             status: String::new(),
             zones: ZoneMap::default(),
         };
@@ -224,7 +253,36 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(zone) = self.zones.hit(mouse.column, mouse.row) {
+                    // Pressing a task row both selects it and arms a potential
+                    // drag; whether it becomes a drag depends on later motion.
+                    if let Zone::TaskRow(si, ti) = zone {
+                        self.drag = Some(Drag {
+                            from: (si, ti),
+                            over: None,
+                            moved: false,
+                        });
+                    }
                     self.activate(zone);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.drag.is_some() {
+                    let target = self.zones.drop_target(mouse.column, mouse.row);
+                    if let Some(drag) = self.drag.as_mut() {
+                        drag.moved = true;
+                        if let Some(target) = target {
+                            drag.over = Some(target);
+                        }
+                    }
+                    self.status = "Drag to reorder — release to drop.".into();
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(drag) = self.drag.take()
+                    && drag.moved
+                    && let Some(target) = drag.over
+                {
+                    self.apply_reorder(drag.from, target);
                 }
             }
             MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_add(1),
@@ -334,6 +392,94 @@ impl App {
         self.select_task(section, task);
     }
 
+    // ---- drag-to-reorder ----------------------------------------------
+
+    /// Move the task at `from` to just before `to` (`(section, index)`),
+    /// updating the local model immediately and then persisting.
+    fn apply_reorder(&mut self, from: (usize, usize), to: (usize, usize)) {
+        let (fs, ft) = from;
+        let (ts, mut tb) = to;
+        if fs >= self.sections.len()
+            || ft >= self.sections[fs].tasks.len()
+            || ts >= self.sections.len()
+        {
+            return;
+        }
+        // Dropping onto itself (or the slot just after it) changes nothing.
+        if fs == ts && (tb == ft || tb == ft + 1) {
+            return;
+        }
+
+        let task = self.sections[fs].tasks.remove(ft);
+        // Removing an earlier index in the same section shifts the target left.
+        if fs == ts && tb > ft {
+            tb -= 1;
+        }
+        tb = tb.min(self.sections[ts].tasks.len());
+        self.sections[ts].tasks.insert(tb, task);
+        self.selected = Some((ts, tb));
+        self.ensure_visible();
+        self.persist_reorder(fs, ts, tb);
+    }
+
+    fn persist_reorder(&mut self, from_section: usize, ts: usize, tb: usize) {
+        let Some(client) = self.client.clone() else {
+            self.status = "Reordered (demo — not saved).".into();
+            return;
+        };
+
+        // Pull what we need, then drop the borrow before touching `status`.
+        let (task_gid, section_gid, task_name, insert_before) = {
+            let Some(section) = self.sections.get(ts) else {
+                return;
+            };
+            let Some(task) = section.tasks.get(tb) else {
+                return;
+            };
+            (
+                task.gid.clone(),
+                section.gid.clone(),
+                task.name.clone(),
+                section.tasks.get(tb + 1).map(|t| t.gid.clone()),
+            )
+        };
+
+        let Some(section_gid) = section_gid else {
+            self.status = "Reordered locally — this section has no id to save to.".into();
+            return;
+        };
+        let tx = self.tx.clone();
+
+        if matches!(self.nav, Nav::MyTasks) {
+            // Asana's API can move a task between My Tasks sections but does not
+            // expose ordering within one — persist moves, keep reorders local.
+            if from_section == ts {
+                self.status =
+                    format!("Reordered {task_name} locally — Asana doesn't save My Tasks order.");
+                return;
+            }
+            self.status = format!("Moving {task_name}…");
+            tokio::spawn(async move {
+                if let Err(err) = client.set_assignee_section(&task_gid, &section_gid).await {
+                    let _ =
+                        tx.send(Event::Asana(AsanaUpdate::Error(format!("move failed: {err:#}"))));
+                }
+            });
+        } else {
+            self.status = format!("Moving {task_name}…");
+            tokio::spawn(async move {
+                if let Err(err) = client
+                    .move_task_in_section(&section_gid, &task_gid, insert_before.as_deref())
+                    .await
+                {
+                    let _ = tx.send(Event::Asana(AsanaUpdate::Error(format!(
+                        "reorder failed: {err:#}"
+                    ))));
+                }
+            });
+        }
+    }
+
     // ---- async loaders -------------------------------------------------
 
     fn load_tasks_for(&self, nav: Nav) {
@@ -386,6 +532,7 @@ impl App {
         self.sections = sections
             .into_iter()
             .map(|s| SectionView {
+                gid: s.gid,
                 name: s.name,
                 tasks: s.tasks,
                 collapsed: false,
@@ -519,6 +666,7 @@ fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
     match nav {
         Nav::MyTasks => vec![
             Section {
+                gid: None,
                 name: "Now".to_string(),
                 tasks: vec![
                     demo_task("d-now-0", "Wire up PAT login", true, None),
@@ -526,10 +674,11 @@ fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
                 ],
             },
             Section {
+                gid: None,
                 name: "Later".to_string(),
                 tasks: vec![
-                    demo_task("d-later-0", "Browser OAuth login", false, None),
-                    demo_task("d-later-1", "Drag-to-reorder rows", false, Some("2026-07-01")),
+                    demo_task("d-later-0", "Drag a row to reorder it", false, None),
+                    demo_task("d-later-1", "Color-coded Dev Status", false, Some("2026-07-01")),
                 ],
             },
         ],
@@ -537,6 +686,7 @@ fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
             let prefix = projects.get(i).map(|p| p.name.as_str()).unwrap_or("Project");
             vec![
                 Section {
+                    gid: None,
                     name: "To do".to_string(),
                     tasks: vec![
                         demo_task(&format!("d-{prefix}-0"), "Three-pane layout", true, None),
@@ -544,6 +694,7 @@ fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
                     ],
                 },
                 Section {
+                    gid: None,
                     name: "Done".to_string(),
                     tasks: vec![demo_task(
                         &format!("d-{prefix}-2"),
