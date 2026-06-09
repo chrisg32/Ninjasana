@@ -71,8 +71,18 @@ pub enum Zone {
     Field(usize),
     /// Detail pane: the comment composer.
     Composer,
-    /// Picklist popup: `(field index, option index)`.
-    EnumOption(usize, usize),
+    /// Picklist popup: an option index.
+    EnumOption(usize),
+    /// Date picker: a day-of-month cell.
+    DateDay(u8),
+    /// Date picker: previous/next month, today, clear.
+    DatePrevMonth,
+    DateNextMonth,
+    DateToday,
+    DateClear,
+    /// People picker: a user index, or unassign.
+    PeopleOption(usize),
+    PeopleUnassign,
     /// Confirm dialog buttons.
     ConfirmYes,
     ConfirmNo,
@@ -159,12 +169,47 @@ pub enum InputTarget {
     Comment,
     /// Set the text value of a custom field (carries the field gid).
     Field(String),
+    /// Set the number value of a custom field (carries the field gid).
+    NumberField(String),
 }
 
 /// An active text-entry buffer (comment composer or field edit).
 pub struct Input {
     pub target: InputTarget,
     pub buffer: String,
+}
+
+/// Which value a non-text edit writes to.
+#[derive(Clone)]
+pub enum EditField {
+    /// A custom field, by gid.
+    Custom(String),
+    /// The built-in assignee.
+    Assignee,
+    /// The built-in due date.
+    DueOn,
+}
+
+/// An open enum/multi-enum picklist.
+pub struct Picklist {
+    pub title: String,
+    pub field_gid: String,
+    pub multi: bool,
+    pub options: Vec<crate::asana::EnumOption>,
+    /// Currently-selected option gids.
+    pub selected: Vec<String>,
+}
+
+/// An open calendar date picker. `month` is 1–12.
+pub struct DatePicker {
+    pub target: EditField,
+    pub year: i32,
+    pub month: u8,
+}
+
+/// An open people picker.
+pub struct PeoplePicker {
+    pub target: EditField,
 }
 
 pub struct App {
@@ -203,8 +248,14 @@ pub struct App {
     pub activity_tab: ActivityTab,
     /// In-progress text entry (comment composer or a text field edit).
     pub input: Option<Input>,
-    /// Index (into `detail_cfg.fields`) of the field whose picklist is open.
-    pub picklist: Option<usize>,
+    /// Open enum/multi-enum picklist, if any.
+    pub picklist: Option<Picklist>,
+    /// Open calendar date picker, if any.
+    pub datepicker: Option<DatePicker>,
+    /// Open people picker, if any.
+    pub people_picker: Option<PeoplePicker>,
+    /// Cached workspace users (for assignee / people pickers).
+    pub users: Vec<crate::asana::User>,
     /// Scroll offset of the description+fields region.
     pub detail_scroll: usize,
     /// Scroll offset of the conversation region.
@@ -271,6 +322,9 @@ impl App {
             activity_tab: ActivityTab::Comments,
             input: None,
             picklist: None,
+            datepicker: None,
+            people_picker: None,
+            users: Vec::new(),
             detail_scroll: 0,
             thread_scroll: 0,
             detail_upper_rect: None,
@@ -385,10 +439,12 @@ impl App {
             }
             return;
         }
-        // The picklist closes on Esc; selection is by click.
-        if self.picklist.is_some() {
+        // Field-edit popups close on Esc; selection is by click.
+        if self.picklist.is_some() || self.datepicker.is_some() || self.people_picker.is_some() {
             if key.code == KeyCode::Esc {
                 self.picklist = None;
+                self.datepicker = None;
+                self.people_picker = None;
             }
             return;
         }
@@ -418,12 +474,31 @@ impl App {
                     }
                     return;
                 }
-                // While a picklist is open, an option selects; anything else closes it.
+                // While a field-edit popup is open, route to it; clicking
+                // elsewhere dismisses it.
                 if self.picklist.is_some() {
-                    if let Zone::EnumOption(field_index, option_index) = zone {
-                        self.select_enum_option(field_index, option_index);
-                    } else {
-                        self.picklist = None;
+                    match zone {
+                        Zone::EnumOption(option_index) => self.pick_option(option_index),
+                        _ => self.picklist = None,
+                    }
+                    return;
+                }
+                if self.datepicker.is_some() {
+                    match zone {
+                        Zone::DateDay(day) => self.pick_date_day(day),
+                        Zone::DatePrevMonth => self.shift_month(-1),
+                        Zone::DateNextMonth => self.shift_month(1),
+                        Zone::DateToday => self.pick_date_today(),
+                        Zone::DateClear => self.clear_date(),
+                        _ => self.datepicker = None,
+                    }
+                    return;
+                }
+                if self.people_picker.is_some() {
+                    match zone {
+                        Zone::PeopleOption(i) => self.pick_person(Some(i)),
+                        Zone::PeopleUnassign => self.pick_person(None),
+                        _ => self.people_picker = None,
                     }
                     return;
                 }
@@ -534,8 +609,16 @@ impl App {
             Zone::ConfirmYes => self.do_complete(),
             Zone::ConfirmNo => self.confirm_complete_open = false,
             Zone::Quit => self.running = false,
-            // Handled on press / in their own modes, never routed here.
-            Zone::ResizeHandle(_) | Zone::EnumOption(..) => {}
+            // Handled on press / inside an open popup, never routed here.
+            Zone::ResizeHandle(_)
+            | Zone::EnumOption(_)
+            | Zone::DateDay(_)
+            | Zone::DatePrevMonth
+            | Zone::DateNextMonth
+            | Zone::DateToday
+            | Zone::DateClear
+            | Zone::PeopleOption(_)
+            | Zone::PeopleUnassign => {}
         }
     }
 
@@ -587,72 +670,310 @@ impl App {
 
     /// The custom field backing detail field `index`, if it's a custom field
     /// present on the current task.
-    fn field_custom(&self, index: usize) -> Option<&crate::asana::CustomField> {
-        let Column::Custom(name) = self.detail_cfg.fields.get(index)? else {
-            return None;
+    /// Begin editing detail field `index`, dispatching by type.
+    fn edit_field(&mut self, index: usize) {
+        let Some(column) = self.detail_cfg.fields.get(index).cloned() else {
+            return;
         };
-        self.detail
-            .as_ref()?
-            .custom_fields
-            .iter()
-            .find(|f| &f.name == name)
+        match column {
+            Column::Assignee => self.open_people_picker(EditField::Assignee),
+            Column::DueDate => {
+                let current = self.detail.as_ref().and_then(|t| t.due_on.clone());
+                self.open_date_picker(EditField::DueOn, current);
+            }
+            Column::Custom(name) => self.edit_custom_field(&name),
+            // Name / Projects / Tags / Completed are not edited here.
+            _ => {}
+        }
     }
 
-    /// Begin editing a field: enum fields open a picklist, text fields open a
-    /// text editor. Other field types are read-only for now.
-    fn edit_field(&mut self, index: usize) {
-        enum Edit {
-            Picklist,
+    fn edit_custom_field(&mut self, name: &str) {
+        enum Open {
+            Picklist {
+                gid: String,
+                multi: bool,
+                options: Vec<crate::asana::EnumOption>,
+                selected: Vec<String>,
+            },
             Text(String, String),
+            Number(String, String),
+            Date(String, Option<String>),
+            People(String),
         }
-        let edit = {
-            let Some(cf) = self.field_custom(index) else {
+        let open = {
+            let Some(cf) = self
+                .detail
+                .as_ref()
+                .and_then(|t| t.custom_fields.iter().find(|f| f.name == name))
+            else {
                 return;
             };
-            if cf.is_enum() && !cf.enum_options.is_empty() {
-                Edit::Picklist
+            let gid = cf.gid.clone();
+            if cf.is_enum() {
+                Open::Picklist {
+                    gid,
+                    multi: false,
+                    options: cf.enum_options.clone(),
+                    selected: cf.enum_value.iter().map(|o| o.gid.clone()).collect(),
+                }
+            } else if cf.is_multi_enum() {
+                Open::Picklist {
+                    gid,
+                    multi: true,
+                    options: cf.enum_options.clone(),
+                    selected: cf.multi_enum_values.iter().map(|o| o.gid.clone()).collect(),
+                }
             } else if cf.is_text() {
-                Edit::Text(cf.gid.clone(), cf.display_value.clone().unwrap_or_default())
+                Open::Text(gid, cf.display_value.clone().unwrap_or_default())
+            } else if cf.is_number() {
+                Open::Number(gid, cf.display_value.clone().unwrap_or_default())
+            } else if cf.is_date() {
+                Open::Date(gid, cf.date_value.as_ref().and_then(|d| d.date.clone()))
+            } else if cf.is_people() {
+                Open::People(gid)
             } else {
                 return;
             }
         };
-        match edit {
-            Edit::Picklist => self.picklist = Some(index),
-            Edit::Text(field_gid, current) => {
-                self.input = Some(Input {
-                    target: InputTarget::Field(field_gid),
-                    buffer: current,
-                });
+        match open {
+            Open::Picklist {
+                gid,
+                multi,
+                options,
+                selected,
+            } => {
+                self.picklist = Some(Picklist {
+                    title: name.to_string(),
+                    field_gid: gid,
+                    multi,
+                    options,
+                    selected,
+                })
             }
+            Open::Text(gid, cur) => {
+                self.input = Some(Input {
+                    target: InputTarget::Field(gid),
+                    buffer: cur,
+                })
+            }
+            Open::Number(gid, cur) => {
+                self.input = Some(Input {
+                    target: InputTarget::NumberField(gid),
+                    buffer: cur,
+                })
+            }
+            Open::Date(gid, cur) => self.open_date_picker(EditField::Custom(gid), cur),
+            Open::People(gid) => self.open_people_picker(EditField::Custom(gid)),
         }
     }
 
-    fn select_enum_option(&mut self, field_index: usize, option_index: usize) {
-        self.picklist = None;
-        let resolved = {
-            let Some(cf) = self.field_custom(field_index) else {
+    /// Toggle (multi) or set (single) an enum option from the open picklist.
+    fn pick_option(&mut self, option_index: usize) {
+        let action = {
+            let Some(pl) = self.picklist.as_mut() else {
                 return;
             };
-            cf.enum_options
-                .get(option_index)
-                .map(|opt| (cf.gid.clone(), opt.gid.clone(), opt.name.clone()))
+            let Some(opt) = pl.options.get(option_index).cloned() else {
+                return;
+            };
+            if pl.multi {
+                if let Some(pos) = pl.selected.iter().position(|g| g == &opt.gid) {
+                    pl.selected.remove(pos);
+                } else {
+                    pl.selected.push(opt.gid.clone());
+                }
+                let names: Vec<String> = pl
+                    .options
+                    .iter()
+                    .filter(|o| pl.selected.contains(&o.gid))
+                    .map(|o| o.name.clone())
+                    .collect();
+                (
+                    pl.field_gid.clone(),
+                    serde_json::json!(pl.selected.clone()),
+                    names.join(", "),
+                    false,
+                )
+            } else {
+                (
+                    pl.field_gid.clone(),
+                    serde_json::json!(opt.gid),
+                    opt.name.clone(),
+                    true,
+                )
+            }
         };
-        let (Some((field_gid, option_gid, option_name)), Some(task_gid)) =
-            (resolved, self.detail_gid.clone())
-        else {
+        let (field_gid, value, display, close) = action;
+        if close {
+            self.picklist = None;
+        }
+        self.write_custom_field(field_gid, value, display);
+    }
+
+    // ---- date picker ---------------------------------------------------
+
+    fn open_date_picker(&mut self, target: EditField, current: Option<String>) {
+        let (year, month) = current
+            .as_deref()
+            .and_then(parse_ymd)
+            .map(|(y, m, _)| (y, m))
+            .unwrap_or_else(today_ym);
+        self.datepicker = Some(DatePicker {
+            target,
+            year,
+            month,
+        });
+    }
+
+    fn shift_month(&mut self, delta: i32) {
+        if let Some(dp) = self.datepicker.as_mut() {
+            let mut m = dp.month as i32 + delta;
+            let mut y = dp.year;
+            while m < 1 {
+                m += 12;
+                y -= 1;
+            }
+            while m > 12 {
+                m -= 12;
+                y += 1;
+            }
+            dp.month = m as u8;
+            dp.year = y;
+        }
+    }
+
+    fn pick_date_day(&mut self, day: u8) {
+        let Some(dp) = self.datepicker.take() else {
             return;
         };
+        let date = format!("{:04}-{:02}-{:02}", dp.year, dp.month, day);
+        self.apply_date(dp.target, Some(date));
+    }
 
-        self.update_local_custom_field(&field_gid, &option_name);
-        self.status = format!("Set field to {option_name}.");
+    fn pick_date_today(&mut self) {
+        let Some(dp) = self.datepicker.take() else {
+            return;
+        };
+        let (y, m, d) = today_ymd();
+        self.apply_date(dp.target, Some(format!("{y:04}-{m:02}-{d:02}")));
+    }
+
+    fn clear_date(&mut self) {
+        let Some(dp) = self.datepicker.take() else {
+            return;
+        };
+        self.apply_date(dp.target, None);
+    }
+
+    fn apply_date(&mut self, target: EditField, date: Option<String>) {
+        let display = date.clone().unwrap_or_else(|| "—".to_string());
+        match target {
+            EditField::Custom(field_gid) => {
+                let value = match &date {
+                    Some(d) => serde_json::json!({ "date": d }),
+                    None => serde_json::Value::Null,
+                };
+                self.write_custom_field(field_gid, value, display);
+            }
+            EditField::DueOn => {
+                if let Some(task) = self.detail.as_mut() {
+                    task.due_on = date.clone();
+                }
+                let value = match &date {
+                    Some(d) => serde_json::json!(d),
+                    None => serde_json::Value::Null,
+                };
+                self.write_builtin("due_on", value);
+            }
+            EditField::Assignee => {}
+        }
+    }
+
+    // ---- people picker -------------------------------------------------
+
+    fn open_people_picker(&mut self, target: EditField) {
+        if self.users.is_empty() {
+            self.load_users();
+        }
+        self.people_picker = Some(PeoplePicker { target });
+    }
+
+    fn load_users(&self) {
+        let (Some(client), Some(workspace)) = (self.client.clone(), self.workspace.clone()) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(users) = client.users(&workspace).await {
+                let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Users(users))));
+            }
+        });
+    }
+
+    fn pick_person(&mut self, index: Option<usize>) {
+        let Some(pp) = self.people_picker.take() else {
+            return;
+        };
+        let user = index.and_then(|i| self.users.get(i).cloned());
+        let gid = user.as_ref().map(|u| u.gid.clone());
+        let display = user
+            .as_ref()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "—".to_string());
+        match pp.target {
+            EditField::Assignee => {
+                if let Some(task) = self.detail.as_mut() {
+                    task.assignee = user.as_ref().map(|u| Named {
+                        name: u.name.clone(),
+                    });
+                }
+                let value = match &gid {
+                    Some(g) => serde_json::json!(g),
+                    None => serde_json::Value::Null,
+                };
+                self.write_builtin("assignee", value);
+            }
+            EditField::Custom(field_gid) => {
+                // People custom fields take an array of user gids.
+                let value = match &gid {
+                    Some(g) => serde_json::json!([g]),
+                    None => serde_json::json!([]),
+                };
+                self.write_custom_field(field_gid, value, display);
+            }
+            EditField::DueOn => {}
+        }
+    }
+
+    // ---- writes --------------------------------------------------------
+
+    fn write_custom_field(&mut self, field_gid: String, value: serde_json::Value, display: String) {
+        self.update_local_custom_field(&field_gid, &display);
+        self.status = "Updating field…".into();
+        let Some(task_gid) = self.detail_gid.clone() else {
+            return;
+        };
         if let Some(client) = self.client.clone() {
             let tx = self.tx.clone();
             tokio::spawn(async move {
-                if let Err(err) = client
-                    .set_custom_field(&task_gid, &field_gid, serde_json::json!(option_gid))
-                    .await
-                {
+                if let Err(err) = client.set_custom_field(&task_gid, &field_gid, value).await {
+                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
+                        "update failed: {err:#}"
+                    )))));
+                }
+            });
+        }
+    }
+
+    fn write_builtin(&mut self, field: &'static str, value: serde_json::Value) {
+        self.status = "Updating…".into();
+        let Some(task_gid) = self.detail_gid.clone() else {
+            return;
+        };
+        if let Some(client) = self.client.clone() {
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                if let Err(err) = client.set_field(&task_gid, field, value).await {
                     let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
                         "update failed: {err:#}"
                     )))));
@@ -666,59 +987,68 @@ impl App {
             return;
         };
         let text = input.buffer.trim().to_string();
+        match input.target {
+            InputTarget::Comment => self.post_comment(text),
+            InputTarget::Field(field_gid) => {
+                let value = if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(text)
+                };
+                let display = if text.is_empty() { "—".to_string() } else { text };
+                self.write_custom_field(field_gid, value, display);
+            }
+            InputTarget::NumberField(field_gid) => {
+                let value = if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    match text.parse::<f64>() {
+                        Ok(n) => serde_json::json!(n),
+                        Err(_) => {
+                            self.status = "Not a valid number.".into();
+                            return;
+                        }
+                    }
+                };
+                let display = if text.is_empty() { "—".to_string() } else { text };
+                self.write_custom_field(field_gid, value, display);
+            }
+        }
+    }
+
+    fn post_comment(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
         let Some(task_gid) = self.detail_gid.clone() else {
             return;
         };
-        match input.target {
-            InputTarget::Comment => {
-                if text.is_empty() {
-                    return;
-                }
-                if let Some(client) = self.client.clone() {
-                    let tx = self.tx.clone();
-                    self.status = "Posting comment…".into();
-                    tokio::spawn(async move {
-                        let update = match client.add_comment(&task_gid, &text).await {
-                            // Re-fetch the thread so the new comment appears.
-                            Ok(()) => match client.stories(&task_gid).await {
-                                Ok(stories) => AsanaUpdate::Stories {
-                                    gid: task_gid,
-                                    stories,
-                                },
-                                Err(err) => AsanaUpdate::Error(format!("{err:#}")),
-                            },
-                            Err(err) => AsanaUpdate::Error(format!("comment failed: {err:#}")),
-                        };
-                        let _ = tx.send(Event::Asana(Box::new(update)));
-                    });
-                } else {
-                    self.stories.push(Story {
-                        kind: "comment".to_string(),
-                        text,
-                        created_at: String::new(),
-                        created_by: Some(Named {
-                            name: "You (demo)".to_string(),
-                        }),
-                    });
-                }
-            }
-            InputTarget::Field(field_gid) => {
-                self.update_local_custom_field(&field_gid, &text);
-                self.status = "Updating field…".into();
-                if let Some(client) = self.client.clone() {
-                    let tx = self.tx.clone();
-                    tokio::spawn(async move {
-                        if let Err(err) = client
-                            .set_custom_field(&task_gid, &field_gid, serde_json::json!(text))
-                            .await
-                        {
-                            let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
-                                "update failed: {err:#}"
-                            )))));
-                        }
-                    });
-                }
-            }
+        if let Some(client) = self.client.clone() {
+            let tx = self.tx.clone();
+            self.status = "Posting comment…".into();
+            tokio::spawn(async move {
+                let update = match client.add_comment(&task_gid, &text).await {
+                    // Re-fetch the thread so the new comment appears.
+                    Ok(()) => match client.stories(&task_gid).await {
+                        Ok(stories) => AsanaUpdate::Stories {
+                            gid: task_gid,
+                            stories,
+                        },
+                        Err(err) => AsanaUpdate::Error(format!("{err:#}")),
+                    },
+                    Err(err) => AsanaUpdate::Error(format!("comment failed: {err:#}")),
+                };
+                let _ = tx.send(Event::Asana(Box::new(update)));
+            });
+        } else {
+            self.stories.push(Story {
+                kind: "comment".to_string(),
+                text,
+                created_at: String::new(),
+                created_by: Some(Named {
+                    name: "You (demo)".to_string(),
+                }),
+            });
         }
     }
 
@@ -773,6 +1103,7 @@ impl App {
                     self.subtasks = subtasks;
                 }
             }
+            AsanaUpdate::Users(users) => self.users = users,
             AsanaUpdate::Error(message) => {
                 self.detail_loading = false;
                 self.stories_loading = false;
@@ -822,6 +1153,8 @@ impl App {
         self.subtasks.clear();
         self.input = None;
         self.picklist = None;
+        self.datepicker = None;
+        self.people_picker = None;
         self.detail_scroll = 0;
         self.thread_scroll = 0;
         if self.client.is_some() {
@@ -1198,6 +1531,9 @@ fn demo_task(gid: &str, name: &str, completed: bool, due: Option<&str>) -> Task 
                     name: name.to_string(),
                 })
                 .collect(),
+            enum_value: None,
+            multi_enum_values: Vec::new(),
+            date_value: None,
         }],
         notes: format!(
             "Demo description for \"{name}\".\n\nConnect a real account with \
@@ -1367,6 +1703,26 @@ fn resolve_drop(
         return None;
     }
     Some((ts, tb))
+}
+
+/// Today as `(year, month, day)` in UTC.
+fn today_ymd() -> (i32, u8, u8) {
+    let date = time::OffsetDateTime::now_utc().date();
+    (date.year(), u8::from(date.month()), date.day())
+}
+
+fn today_ym() -> (i32, u8) {
+    let (y, m, _) = today_ymd();
+    (y, m)
+}
+
+/// Parse a `YYYY-MM-DD` string into `(year, month, day)`.
+fn parse_ymd(s: &str) -> Option<(i32, u8, u8)> {
+    let mut parts = s.split('-');
+    let y = parts.next()?.parse().ok()?;
+    let m = parts.next()?.parse().ok()?;
+    let d = parts.next()?.parse().ok()?;
+    Some((y, m, d))
 }
 
 /// Pick projects matching `names` (case-insensitive), in the order `names`

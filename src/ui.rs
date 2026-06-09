@@ -56,6 +56,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.picklist.is_some() {
         render_picklist_popup(frame, app);
     }
+    if app.datepicker.is_some() {
+        render_datepicker_popup(frame, app);
+    }
+    if app.people_picker.is_some() {
+        render_people_popup(frame, app);
+    }
     if app.confirm_complete_open {
         render_confirm_dialog(frame, app);
     }
@@ -534,7 +540,9 @@ fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(input) => {
             let label = match input.target {
                 crate::app::InputTarget::Comment => " New comment ",
-                crate::app::InputTarget::Field(_) => " Edit field ",
+                crate::app::InputTarget::Field(_) | crate::app::InputTarget::NumberField(_) => {
+                    " Edit field "
+                }
             };
             (label, format!("{}▏", input.buffer))
         }
@@ -726,55 +734,45 @@ fn render_confirm_dialog(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_picklist_popup(frame: &mut Frame, app: &mut App) {
-    // Resolve the field's options up front, then drop the borrow before drawing.
-    let Some(field_index) = app.picklist else {
+    let Some(pl) = app.picklist.as_ref() else {
         return;
     };
-    let resolved = {
-        let Some(Column::Custom(name)) = app.detail_cfg.fields.get(field_index) else {
-            return;
-        };
-        let Some(task) = app.detail.as_ref() else {
-            return;
-        };
-        task.custom_fields.iter().find(|f| &f.name == name).map(|cf| {
-            (
-                name.clone(),
-                cf.enum_options.iter().map(|o| o.name.clone()).collect::<Vec<_>>(),
-                cf.display_value.clone().unwrap_or_default(),
-            )
-        })
-    };
-    let Some((title, options, current)) = resolved else {
-        return;
-    };
+    let title = pl.title.clone();
+    let multi = pl.multi;
+    // (name, selected) per option.
+    let options: Vec<(String, bool)> = pl
+        .options
+        .iter()
+        .map(|o| (o.name.clone(), pl.selected.contains(&o.gid)))
+        .collect();
 
     let screen = frame.area();
-    let w = 36u16.min(screen.width.saturating_sub(2));
+    let w = 40u16.min(screen.width.saturating_sub(2));
     let h = (options.len() as u16 + 2).clamp(3, screen.height.saturating_sub(2));
-    let rect = Rect {
-        x: screen.x + (screen.width.saturating_sub(w)) / 2,
-        y: screen.y + (screen.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
+    let rect = centered(screen, w, h);
     frame.render_widget(Clear, rect);
+    let suffix = if multi { " (multi) " } else { " " };
     let block = Block::bordered()
-        .title(format!(" {title} "))
+        .title(format!(" {title}{suffix}"))
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    for (i, name) in options.iter().enumerate().take(inner.height as usize) {
+    for (i, (name, selected)) in options.iter().enumerate().take(inner.height as usize) {
         let row = Rect {
             x: inner.x,
             y: inner.y + i as u16,
             width: inner.width,
             height: 1,
         };
-        let selected = *name == current;
-        let style = if selected {
+        let marker = match (multi, *selected) {
+            (true, true) => "[x] ",
+            (true, false) => "[ ] ",
+            (false, true) => "● ",
+            (false, false) => "  ",
+        };
+        let style = if *selected {
             Style::new()
                 .fg(Color::Black)
                 .bg(ACCENT)
@@ -782,13 +780,180 @@ fn render_picklist_popup(frame: &mut Frame, app: &mut App) {
         } else {
             Style::new()
         };
-        let marker = if selected { "● " } else { "  " };
         frame.render_widget(
             Paragraph::new(fit(&format!("{marker}{name}"), inner.width as usize)).style(style),
             row,
         );
-        app.zones.push(Zone::EnumOption(field_index, i), row);
+        app.zones.push(Zone::EnumOption(i), row);
     }
+}
+
+fn render_datepicker_popup(frame: &mut Frame, app: &mut App) {
+    let Some(dp) = app.datepicker.as_ref() else {
+        return;
+    };
+    let (year, month_num) = (dp.year, dp.month);
+    let Ok(month) = time::Month::try_from(month_num) else {
+        return;
+    };
+    let days = month.length(year);
+    let first_weekday = time::Date::from_calendar_date(year, month, 1)
+        .map(|d| d.weekday().number_days_from_sunday())
+        .unwrap_or(0);
+    let (ty, tm, td) = today_ymd_ui();
+
+    let screen = frame.area();
+    let w = 30u16.min(screen.width.saturating_sub(2));
+    let h = 12u16.min(screen.height.saturating_sub(2));
+    let rect = centered(screen, w, h);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Pick a date ")
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width < 21 || inner.height < 8 {
+        return;
+    }
+
+    // Header: ‹  Month YYYY  › with prev/next zones.
+    let header = Rect { height: 1, ..inner };
+    let prev = Rect { width: 1, ..header };
+    let next = Rect { x: header.x + header.width - 1, width: 1, ..header };
+    frame.render_widget(Paragraph::new("‹"), prev);
+    frame.render_widget(Paragraph::new("›").alignment(ratatui::layout::Alignment::Right), next);
+    frame.render_widget(
+        Paragraph::new(format!("{} {year}", month_name(month_num)))
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(Style::new().add_modifier(Modifier::BOLD)),
+        header,
+    );
+    app.zones.push(Zone::DatePrevMonth, prev);
+    app.zones.push(Zone::DateNextMonth, next);
+
+    // Weekday labels (3 cols per day).
+    let grid_x = inner.x;
+    let dow = Rect { y: inner.y + 1, height: 1, ..inner };
+    frame.render_widget(
+        Paragraph::new("Su Mo Tu We Th Fr Sa").style(Style::new().fg(Color::DarkGray)),
+        dow,
+    );
+
+    // Day grid.
+    let mut col = first_weekday as u16;
+    let mut row: u16 = 0;
+    for day in 1..=days {
+        let cell = Rect {
+            x: grid_x + col * 3,
+            y: inner.y + 2 + row,
+            width: 2,
+            height: 1,
+        };
+        let is_today = (year, month_num, day) == (ty, tm, td);
+        let style = if is_today {
+            Style::new().fg(Color::Black).bg(ACCENT)
+        } else {
+            Style::new()
+        };
+        frame.render_widget(Paragraph::new(format!("{day:>2}")).style(style), cell);
+        app.zones.push(Zone::DateDay(day), cell);
+        col += 1;
+        if col == 7 {
+            col = 0;
+            row += 1;
+        }
+    }
+
+    // Footer: [Today] [Clear].
+    let footer = Rect { y: inner.y + inner.height - 1, height: 1, ..inner };
+    let today_rect = Rect { width: 7, ..footer };
+    let clear_rect = Rect { x: footer.x + 8, width: 7, ..footer };
+    frame.render_widget(
+        Paragraph::new(" Today ").style(Style::new().fg(Color::Black).bg(Color::Green)),
+        today_rect,
+    );
+    frame.render_widget(
+        Paragraph::new(" Clear ").style(Style::new().fg(Color::White).bg(Color::Red)),
+        clear_rect,
+    );
+    app.zones.push(Zone::DateToday, today_rect);
+    app.zones.push(Zone::DateClear, clear_rect);
+}
+
+fn render_people_popup(frame: &mut Frame, app: &mut App) {
+    if app.people_picker.is_none() {
+        return;
+    }
+    let names: Vec<String> = app.users.iter().map(|u| u.name.clone()).collect();
+
+    let screen = frame.area();
+    let w = 36u16.min(screen.width.saturating_sub(2));
+    let h = 18u16.min(screen.height.saturating_sub(2));
+    let rect = centered(screen, w, h);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Assign ")
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.height == 0 {
+        return;
+    }
+
+    if names.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Loading users…").style(Style::new().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    // First row unassigns; the rest are users (clipped to the popup height).
+    let unassign = Rect { height: 1, ..inner };
+    frame.render_widget(
+        Paragraph::new("  (unassign)").style(Style::new().fg(Color::DarkGray)),
+        unassign,
+    );
+    app.zones.push(Zone::PeopleUnassign, unassign);
+
+    let capacity = inner.height.saturating_sub(1) as usize;
+    for (i, name) in names.iter().enumerate().take(capacity) {
+        let row = Rect {
+            x: inner.x,
+            y: inner.y + 1 + i as u16,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(fit(&format!("  {name}"), inner.width as usize)), row);
+        app.zones.push(Zone::PeopleOption(i), row);
+    }
+}
+
+/// Center a `w`×`h` rect within `area`.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+fn month_name(month: u8) -> &'static str {
+    [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December",
+    ]
+    .get((month.saturating_sub(1)) as usize)
+    .copied()
+    .unwrap_or("")
+}
+
+fn today_ymd_ui() -> (i32, u8, u8) {
+    let date = time::OffsetDateTime::now_utc().date();
+    (date.year(), u8::from(date.month()), date.day())
 }
 
 /// Color a detail field value like the table: tags magenta, status-style custom

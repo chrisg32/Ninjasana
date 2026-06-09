@@ -156,7 +156,7 @@ ninjasana --help          # full help
 | Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
 | Click **Copy Link** | Copy the task's URL to the clipboard |
 | Click **Comments** / **All activity** | Switch the conversation tab |
-| Click a **field** | Edit it — picklist for enum fields, text entry for text fields |
+| Click a **field** | Edit it — picklist, text/number entry, calendar, or user picker by type |
 | Click a **subtask** | Open that subtask in the detail pane |
 | Click the **composer** and type | Add a comment (Enter sends, Esc cancels) |
 | Click **Quit** / `q` / `Esc` | Exit |
@@ -228,9 +228,18 @@ The `[detail]` table controls the right-hand task pane:
 - `confirm_complete` — whether **Mark complete** asks before completing.
 - `fields` — the fields listed under the description, in order, using the same
   tokens as `columns` (built-ins and `custom:<field>`). The title is always
-  shown; subtasks and the Comments / All activity tabs always follow. Enum and
-  text custom fields are editable in place (other field types are read-only for
-  now).
+  shown; subtasks and the Comments / All activity tabs always follow.
+
+Click a field to edit it; the editor matches the field type:
+
+| Field type | Editor |
+| --- | --- |
+| enum | single-select picklist |
+| multi_enum | multi-select picklist (toggle options) |
+| text | inline text entry |
+| number | inline numeric entry |
+| date · built-in due date | calendar date picker (with Today / Clear) |
+| people · built-in assignee | user picker |
 
 ## Where your data lives
 

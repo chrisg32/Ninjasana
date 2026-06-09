@@ -42,6 +42,8 @@ pub enum AsanaUpdate {
     Stories { gid: String, stories: Vec<Story> },
     /// Subtasks of a task.
     Subtasks { gid: String, subtasks: Vec<Task> },
+    /// Workspace users (for assignee / people pickers).
+    Users(Vec<User>),
     /// Something went wrong; carries a human-readable message.
     Error(String),
 }
@@ -137,6 +139,22 @@ pub struct CustomField {
     pub resource_subtype: String,
     #[serde(default)]
     pub enum_options: Vec<EnumOption>,
+    /// The currently selected option (enum fields).
+    #[serde(default)]
+    pub enum_value: Option<EnumOption>,
+    /// The currently selected options (multi_enum fields).
+    #[serde(default)]
+    pub multi_enum_values: Vec<EnumOption>,
+    /// The current value (date fields).
+    #[serde(default)]
+    pub date_value: Option<DateValue>,
+}
+
+/// A date custom field value (date-only or with a time).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DateValue {
+    #[serde(default)]
+    pub date: Option<String>,
 }
 
 impl CustomField {
@@ -144,8 +162,24 @@ impl CustomField {
         self.resource_subtype == "enum"
     }
 
+    pub fn is_multi_enum(&self) -> bool {
+        self.resource_subtype == "multi_enum"
+    }
+
     pub fn is_text(&self) -> bool {
         self.resource_subtype == "text"
+    }
+
+    pub fn is_number(&self) -> bool {
+        self.resource_subtype == "number"
+    }
+
+    pub fn is_date(&self) -> bool {
+        self.resource_subtype == "date"
+    }
+
+    pub fn is_people(&self) -> bool {
+        self.resource_subtype == "people"
     }
 }
 
@@ -464,7 +498,9 @@ impl Client {
                  memberships.project.name,tags.name,\
                  custom_fields.gid,custom_fields.name,custom_fields.display_value,\
                  custom_fields.resource_subtype,custom_fields.enum_options.gid,\
-                 custom_fields.enum_options.name",
+                 custom_fields.enum_options.name,custom_fields.enum_value.gid,\
+                 custom_fields.enum_value.name,custom_fields.multi_enum_values.gid,\
+                 custom_fields.multi_enum_values.name,custom_fields.date_value.date",
             )],
         )
         .await
@@ -511,12 +547,38 @@ impl Client {
         .await
     }
 
-    /// Set a custom field value (an enum option gid, or text/number value).
+    /// Set a custom field value. The `value` must already be in Asana's write
+    /// shape for the field type (enum: option gid; multi_enum: array of gids;
+    /// text: string; number: number; date: `{ "date": "YYYY-MM-DD" }`; people:
+    /// array of user gids; `null` clears).
     pub async fn set_custom_field(&self, gid: &str, field_gid: &str, value: Value) -> Result<()> {
         self.write(
             reqwest::Method::PUT,
             &format!("tasks/{gid}"),
             json!({ "data": { "custom_fields": { field_gid: value } } }),
+        )
+        .await
+    }
+
+    /// Set a built-in task field (e.g. `assignee`, `due_on`) to a JSON value.
+    pub async fn set_field(&self, gid: &str, field: &str, value: Value) -> Result<()> {
+        self.write(
+            reqwest::Method::PUT,
+            &format!("tasks/{gid}"),
+            json!({ "data": { field: value } }),
+        )
+        .await
+    }
+
+    /// Users in a workspace (for assignee / people-field pickers).
+    pub async fn users(&self, workspace_gid: &str) -> Result<Vec<User>> {
+        self.get_all(
+            "users",
+            &[
+                ("workspace", workspace_gid),
+                ("limit", "100"),
+                ("opt_fields", "name"),
+            ],
         )
         .await
     }
