@@ -184,6 +184,12 @@ columns = ["name", "due_date", "assignee", "projects", "tags"]
 #   projects = ["ISMS", "Sprint - Maximilian", "Software Department"]
 projects = "favorites"
 
+# Show the top header bar and bottom status bar. Applies in every mode — turn
+# them off (e.g. when opening a single task with `ninjasana <task_url>`) to use
+# the full height of the terminal.
+show_header = true
+show_footer = true
+
 # The task detail pane (right side).
 [detail]
 show_description = true    # show the task description?

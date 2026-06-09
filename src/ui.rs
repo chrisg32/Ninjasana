@@ -26,19 +26,31 @@ enum Row {
 pub fn render(frame: &mut Frame, app: &mut App) {
     app.zones.clear();
 
-    let [header, body, status] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    // Header and status bars are optional (configurable, any mode).
+    let mut constraints = Vec::new();
+    if app.show_header {
+        constraints.push(Constraint::Length(3));
+    }
+    constraints.push(Constraint::Min(0));
+    if app.show_footer {
+        constraints.push(Constraint::Length(1));
+    }
+    let chunks = Layout::vertical(constraints).split(frame.area());
 
-    render_header(frame, app, header);
+    let mut idx = 0;
+    if app.show_header {
+        render_header(frame, app, chunks[idx]);
+        idx += 1;
+    }
+    let body = chunks[idx];
+    idx += 1;
     match app.mode {
         AppMode::TaskDetail(_) => render_detail(frame, app, body),
         AppMode::Full => render_full_body(frame, app, body),
     }
-    render_status(frame, app, status);
+    if app.show_footer {
+        render_status(frame, app, chunks[idx]);
+    }
 
     // Modal overlays last, so their zones sit on top.
     if app.picklist.is_some() {

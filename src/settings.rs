@@ -147,6 +147,10 @@ pub struct Settings {
     pub columns: Vec<Column>,
     pub projects: ProjectSource,
     pub detail: DetailConfig,
+    /// Show the top header bar (in any mode).
+    pub show_header: bool,
+    /// Show the bottom status bar (in any mode).
+    pub show_footer: bool,
 }
 
 impl Settings {
@@ -163,10 +167,14 @@ impl Settings {
             .and_then(|r| r.detail.as_ref())
             .map(detail_config)
             .unwrap_or_else(default_detail);
+        let show_header = raw.as_ref().and_then(|r| r.show_header).unwrap_or(true);
+        let show_footer = raw.as_ref().and_then(|r| r.show_footer).unwrap_or(true);
         Settings {
             columns,
             projects,
             detail,
+            show_header,
+            show_footer,
         }
     }
 }
@@ -179,6 +187,8 @@ struct RawConfig {
     projects: Option<RawProjects>,
     #[serde(default)]
     detail: Option<RawDetail>,
+    show_header: Option<bool>,
+    show_footer: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -259,6 +269,11 @@ columns = [\"name\", \"due_date\", \"assignee\", \"projects\", \"tags\"]
 # ...or an explicit, ordered list of project names to show exactly those:
 #   projects = [\"ISMS\", \"Sprint - Maximilian\", \"Software Department\"]
 projects = \"favorites\"
+
+# Show the top header bar and bottom status bar (applies in every mode).
+# Turn these off (e.g. when opening a single task) to maximize screen space.
+show_header = true
+show_footer = true
 
 # The task detail pane (right side).
 [detail]
@@ -355,6 +370,13 @@ mod tests {
             detail.fields,
             vec![Column::Assignee, Column::Custom("Dev Status v2".to_string())]
         );
+    }
+
+    #[test]
+    fn header_footer_flags_parse_and_default() {
+        let raw: RawConfig = toml::from_str("show_header = false").unwrap();
+        assert_eq!(raw.show_header, Some(false));
+        assert_eq!(raw.show_footer, None); // absent -> defaulted to true at load
     }
 
     #[test]

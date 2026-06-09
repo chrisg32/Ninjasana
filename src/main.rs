@@ -56,6 +56,8 @@ async fn main() -> Result<()> {
         settings.columns,
         settings.projects,
         settings.detail,
+        settings.show_header,
+        settings.show_footer,
     )
     .run(&mut terminal)
     .await;

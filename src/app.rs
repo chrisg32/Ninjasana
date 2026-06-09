@@ -216,6 +216,9 @@ pub struct App {
     pub confirm_complete_open: bool,
     /// Detail pane configuration.
     pub detail_cfg: DetailConfig,
+    /// Whether to draw the top header / bottom status bars.
+    pub show_header: bool,
+    pub show_footer: bool,
 
     /// Columns shown in the task table, from the user's config.
     pub columns: Vec<Column>,
@@ -239,6 +242,8 @@ impl App {
         columns: Vec<Column>,
         project_source: ProjectSource,
         detail_cfg: DetailConfig,
+        show_header: bool,
+        show_footer: bool,
     ) -> Self {
         // A dummy sender; replaced with the real one in `run`.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -272,6 +277,8 @@ impl App {
             detail_thread_rect: None,
             confirm_complete_open: false,
             detail_cfg,
+            show_header,
+            show_footer,
             columns,
             project_source,
             drag: None,
