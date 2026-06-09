@@ -737,11 +737,11 @@ impl App {
             NoOptions,
         }
         let resolved = {
-            let Some(cf) = self
-                .detail
-                .as_ref()
-                .and_then(|t| t.custom_fields.iter().find(|f| f.name == name))
-            else {
+            let Some(cf) = self.detail.as_ref().and_then(|t| {
+                t.custom_fields
+                    .iter()
+                    .find(|f| crate::asana::field_name_matches(&f.name, name))
+            }) else {
                 self.status = format!("No \"{name}\" field on this task.");
                 return;
             };

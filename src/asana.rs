@@ -232,10 +232,17 @@ impl Task {
     pub fn custom_field(&self, name: &str) -> Option<String> {
         self.custom_fields
             .iter()
-            .find(|f| f.name == name)
+            .find(|f| field_name_matches(&f.name, name))
             .and_then(|f| f.display_value.clone())
             .filter(|v| !v.is_empty())
     }
+}
+
+/// Match a configured field name against an Asana field name, tolerating stray
+/// whitespace and case differences (Asana field names sometimes have trailing
+/// spaces, e.g. "Urgency ").
+pub fn field_name_matches(asana_name: &str, configured: &str) -> bool {
+    asana_name.trim().eq_ignore_ascii_case(configured.trim())
 }
 
 /// A named group of tasks, in display order. `gid` is the section's id when one
@@ -669,7 +676,16 @@ fn group_by_assignee_section(tasks: Vec<Task>) -> Vec<Section> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_by_assignee_section, Task};
+    use super::{field_name_matches, group_by_assignee_section, Task};
+
+    #[test]
+    fn field_names_match_despite_whitespace_and_case() {
+        // Asana field names sometimes carry trailing spaces (the real "Urgency " bug).
+        assert!(field_name_matches("Urgency ", "Urgency"));
+        assert!(field_name_matches("Customer ", "customer"));
+        assert!(field_name_matches("Dev Status v2", "Dev Status v2"));
+        assert!(!field_name_matches("Dev Status", "Dev Status v2"));
+    }
 
     #[test]
     fn groups_my_tasks_by_assignee_section_in_first_seen_order() {
