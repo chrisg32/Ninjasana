@@ -1,0 +1,17 @@
+[package]
+name = "ninjasana"
+version = "0.1.0"
+edition = "2024"
+description = "A mouse-native terminal UI for Asana, inspired by herdr."
+license = "MIT"
+repository = "https://github.com/chrisg32/Ninjasana"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1.0.102"
+dotenvy = "0.15.7"
+ratatui = "0.30.1"
+reqwest = { version = "0.13.4", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time"] }

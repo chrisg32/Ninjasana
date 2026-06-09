@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target
+
+# Local environment / secrets
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# Local Claude Code session files
+/.claude
