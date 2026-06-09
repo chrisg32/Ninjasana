@@ -162,7 +162,8 @@ ninjasana --help          # full help
 | Click **Quit** / `q` / `Esc` | Exit |
 
 In the confirmation dialog: `y` / Enter confirms, `n` / Esc cancels. In a
-picklist: click an option, or Esc to dismiss.
+picklist: click an option (scroll for long lists), Esc to dismiss. In the
+people picker: type to search, click a name (or **(unassign)**), Esc to dismiss.
 
 ## Configuration
 
@@ -239,7 +240,7 @@ Click a field to edit it; the editor matches the field type:
 | text | inline text entry |
 | number | inline numeric entry |
 | date · built-in due date | calendar date picker (with Today / Clear) |
-| people · built-in assignee | user picker |
+| people · built-in assignee | user picker (type to search, scroll) |
 
 ## Where your data lives
 

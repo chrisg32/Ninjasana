@@ -254,6 +254,10 @@ pub struct App {
     pub datepicker: Option<DatePicker>,
     /// Open people picker, if any.
     pub people_picker: Option<PeoplePicker>,
+    /// Search query within the people picker.
+    pub people_query: String,
+    /// Scroll offset within the open picklist / people popup.
+    pub popup_scroll: usize,
     /// Cached workspace users (for assignee / people pickers).
     pub users: Vec<crate::asana::User>,
     /// Scroll offset of the description+fields region.
@@ -324,6 +328,8 @@ impl App {
             picklist: None,
             datepicker: None,
             people_picker: None,
+            people_query: String::new(),
+            popup_scroll: 0,
             users: Vec::new(),
             detail_scroll: 0,
             thread_scroll: 0,
@@ -439,12 +445,27 @@ impl App {
             }
             return;
         }
-        // Field-edit popups close on Esc; selection is by click.
-        if self.picklist.is_some() || self.datepicker.is_some() || self.people_picker.is_some() {
+        // The people picker is type-to-search.
+        if self.people_picker.is_some() {
+            match key.code {
+                KeyCode::Esc => self.people_picker = None,
+                KeyCode::Backspace => {
+                    self.people_query.pop();
+                    self.popup_scroll = 0;
+                }
+                KeyCode::Char(c) => {
+                    self.people_query.push(c);
+                    self.popup_scroll = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Other field-edit popups close on Esc; selection is by click.
+        if self.picklist.is_some() || self.datepicker.is_some() {
             if key.code == KeyCode::Esc {
                 self.picklist = None;
                 self.datepicker = None;
-                self.people_picker = None;
             }
             return;
         }
@@ -552,9 +573,18 @@ impl App {
                     self.apply_reorder(drag.from, target);
                 }
             }
-            MouseEventKind::ScrollDown => self.scroll_at(mouse.column, mouse.row, 1),
-            MouseEventKind::ScrollUp => self.scroll_at(mouse.column, mouse.row, -1),
+            MouseEventKind::ScrollDown => self.scroll_delta(mouse.column, mouse.row, 1),
+            MouseEventKind::ScrollUp => self.scroll_delta(mouse.column, mouse.row, -1),
             _ => {}
+        }
+    }
+
+    fn scroll_delta(&mut self, column: u16, row: u16, delta: isize) {
+        // A scrollable popup, when open, captures the wheel.
+        if self.picklist.is_some() || self.people_picker.is_some() {
+            self.popup_scroll = self.popup_scroll.saturating_add_signed(delta);
+        } else {
+            self.scroll_at(column, row, delta);
         }
     }
 
@@ -672,6 +702,7 @@ impl App {
     /// present on the current task.
     /// Begin editing detail field `index`, dispatching by type.
     fn edit_field(&mut self, index: usize) {
+        self.popup_scroll = 0;
         let Some(column) = self.detail_cfg.fields.get(index).cloned() else {
             return;
         };
@@ -700,38 +731,62 @@ impl App {
             Date(String, Option<String>),
             People(String),
         }
-        let open = {
+        enum Resolved {
+            Open(Open),
+            NotEditable(String),
+            NoOptions,
+        }
+        let resolved = {
             let Some(cf) = self
                 .detail
                 .as_ref()
                 .and_then(|t| t.custom_fields.iter().find(|f| f.name == name))
             else {
+                self.status = format!("No \"{name}\" field on this task.");
                 return;
             };
             let gid = cf.gid.clone();
-            if cf.is_enum() {
-                Open::Picklist {
-                    gid,
-                    multi: false,
-                    options: cf.enum_options.clone(),
-                    selected: cf.enum_value.iter().map(|o| o.gid.clone()).collect(),
-                }
-            } else if cf.is_multi_enum() {
-                Open::Picklist {
-                    gid,
-                    multi: true,
-                    options: cf.enum_options.clone(),
-                    selected: cf.multi_enum_values.iter().map(|o| o.gid.clone()).collect(),
+            if cf.is_enum() || cf.is_multi_enum() {
+                if cf.enum_options.is_empty() {
+                    Resolved::NoOptions
+                } else {
+                    let multi = cf.is_multi_enum();
+                    let selected = if multi {
+                        cf.multi_enum_values.iter().map(|o| o.gid.clone()).collect()
+                    } else {
+                        cf.enum_value.iter().map(|o| o.gid.clone()).collect()
+                    };
+                    Resolved::Open(Open::Picklist {
+                        gid,
+                        multi,
+                        options: cf.enum_options.clone(),
+                        selected,
+                    })
                 }
             } else if cf.is_text() {
-                Open::Text(gid, cf.display_value.clone().unwrap_or_default())
+                Resolved::Open(Open::Text(gid, cf.display_value.clone().unwrap_or_default()))
             } else if cf.is_number() {
-                Open::Number(gid, cf.display_value.clone().unwrap_or_default())
+                Resolved::Open(Open::Number(gid, cf.display_value.clone().unwrap_or_default()))
             } else if cf.is_date() {
-                Open::Date(gid, cf.date_value.as_ref().and_then(|d| d.date.clone()))
+                Resolved::Open(Open::Date(
+                    gid,
+                    cf.date_value.as_ref().and_then(|d| d.date.clone()),
+                ))
             } else if cf.is_people() {
-                Open::People(gid)
+                Resolved::Open(Open::People(gid))
             } else {
+                Resolved::NotEditable(cf.resource_subtype.clone())
+            }
+        };
+        let open = match resolved {
+            Resolved::Open(open) => open,
+            Resolved::NoOptions => {
+                self.status = format!("\"{name}\" has no options to choose from.");
+                return;
+            }
+            Resolved::NotEditable(subtype) => {
+                let kind = if subtype.is_empty() { "this type" } else { &subtype };
+                self.status = format!("\"{name}\" ({kind}) isn't editable yet.");
                 return;
             }
         };
@@ -895,6 +950,8 @@ impl App {
         if self.users.is_empty() {
             self.load_users();
         }
+        self.people_query.clear();
+        self.popup_scroll = 0;
         self.people_picker = Some(PeoplePicker { target });
     }
 

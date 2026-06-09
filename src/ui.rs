@@ -759,10 +759,14 @@ fn render_picklist_popup(frame: &mut Frame, app: &mut App) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    for (i, (name, selected)) in options.iter().enumerate().take(inner.height as usize) {
+    let height = inner.height as usize;
+    let start = app.popup_scroll.min(options.len().saturating_sub(1));
+    for (offset, (i, (name, selected))) in
+        options.iter().enumerate().skip(start).take(height).enumerate()
+    {
         let row = Rect {
             x: inner.x,
-            y: inner.y + i as u16,
+            y: inner.y + offset as u16,
             width: inner.width,
             height: 1,
         };
@@ -885,10 +889,18 @@ fn render_people_popup(frame: &mut Frame, app: &mut App) {
     if app.people_picker.is_none() {
         return;
     }
-    let names: Vec<String> = app.users.iter().map(|u| u.name.clone()).collect();
+    let query = app.people_query.to_lowercase();
+    // Keep original indices so clicks map straight back to `app.users`.
+    let filtered: Vec<(usize, String)> = app
+        .users
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| query.is_empty() || u.name.to_lowercase().contains(&query))
+        .map(|(i, u)| (i, u.name.clone()))
+        .collect();
 
     let screen = frame.area();
-    let w = 36u16.min(screen.width.saturating_sub(2));
+    let w = 38u16.min(screen.width.saturating_sub(2));
     let h = 18u16.min(screen.height.saturating_sub(2));
     let rect = centered(screen, w, h);
     frame.render_widget(Clear, rect);
@@ -898,36 +910,57 @@ fn render_people_popup(frame: &mut Frame, app: &mut App) {
         .border_style(Style::new().fg(ACCENT));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    if inner.height == 0 {
+    if inner.height < 2 {
         return;
     }
 
-    if names.is_empty() {
+    // Search box on top.
+    let search = Rect { height: 1, ..inner };
+    frame.render_widget(
+        Paragraph::new(format!("Search: {}▏", app.people_query)).style(Style::new().fg(ACCENT)),
+        search,
+    );
+
+    let list_top = inner.y + 1;
+    let list_h = inner.height.saturating_sub(1) as usize;
+
+    if app.users.is_empty() {
         frame.render_widget(
             Paragraph::new("Loading users…").style(Style::new().fg(Color::DarkGray)),
-            inner,
+            Rect {
+                y: list_top,
+                height: 1,
+                ..inner
+            },
         );
         return;
     }
 
-    // First row unassigns; the rest are users (clipped to the popup height).
-    let unassign = Rect { height: 1, ..inner };
-    frame.render_widget(
-        Paragraph::new("  (unassign)").style(Style::new().fg(Color::DarkGray)),
-        unassign,
-    );
-    app.zones.push(Zone::PeopleUnassign, unassign);
+    // Item 0 unassigns; the rest are the (filtered) users.
+    let mut items: Vec<(Option<usize>, String)> = vec![(None, "(unassign)".to_string())];
+    items.extend(filtered.into_iter().map(|(i, name)| (Some(i), name)));
 
-    let capacity = inner.height.saturating_sub(1) as usize;
-    for (i, name) in names.iter().enumerate().take(capacity) {
+    let start = app.popup_scroll.min(items.len().saturating_sub(1));
+    for (offset, (orig, name)) in items.iter().skip(start).take(list_h).enumerate() {
         let row = Rect {
             x: inner.x,
-            y: inner.y + 1 + i as u16,
+            y: list_top + offset as u16,
             width: inner.width,
             height: 1,
         };
-        frame.render_widget(Paragraph::new(fit(&format!("  {name}"), inner.width as usize)), row);
-        app.zones.push(Zone::PeopleOption(i), row);
+        let style = if orig.is_none() {
+            Style::new().fg(Color::DarkGray)
+        } else {
+            Style::new()
+        };
+        frame.render_widget(
+            Paragraph::new(fit(&format!("  {name}"), inner.width as usize)).style(style),
+            row,
+        );
+        match orig {
+            Some(i) => app.zones.push(Zone::PeopleOption(*i), row),
+            None => app.zones.push(Zone::PeopleUnassign, row),
+        }
     }
 }
 
