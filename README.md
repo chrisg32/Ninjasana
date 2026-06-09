@@ -20,41 +20,56 @@ both sides of the PTY boundary.
 The Asana API is reached directly over REST (`reqwest` + `serde`); Asana ships
 no official Rust SDK, and its responses map cleanly onto `serde` types.
 
+## Commands
+
+```sh
+ninjasana            # full three-pane Asana view
+ninjasana <task_url> # open just the detail pane for one task (URL or bare id)
+ninjasana login      # store an Asana Personal Access Token (validated, kept in the OS keychain)
+ninjasana logout     # remove the stored token
+```
+
+The full view mirrors how Asana looks in the browser:
+
+- **Left** — navigation: *My Tasks* pinned on top, then your projects.
+- **Middle** — the tasks in the selected list.
+- **Right** — task detail, shown only once a task is selected.
+
 ## Status
 
-Early scaffold. Working today:
+Working today:
 
-- Terminal setup with mouse capture + panic-safe restore.
-- An async event bus merging keyboard, mouse, ticks, and Asana API results.
-- A clickable **zone** hit-testing system (`ZoneMap`).
-- A three-pane layout (header / sidebar / task list / status bar) with clickable
-  views, clickable task rows, a clickable Quit button, and scroll-wheel support.
-- A thin async Asana client that authenticates via `/users/me` on startup.
+- `login` / `logout` with a Personal Access Token stored in the macOS Keychain.
+- Live data: identity + workspace + projects on startup, My Tasks and per-project
+  task lists, and full task detail (status, assignee, due date, notes, permalink).
+- `ninjasana <task_url>` opens straight to the detail pane.
+- Mouse-native foundation: clickable nav, clickable task rows, a clickable Quit
+  button, scroll-wheel support, and panic-safe terminal restore — all built on a
+  `ZoneMap` that hit-tests clicks against the same rectangles we lay out.
+- An offline **demo mode** when no token is set, so you can click around.
 
-The task list is demo data until the real Asana fetches are wired in.
+Next up: browser OAuth login (loopback + PKCE), drag-to-reorder, and right-click
+context menus.
 
 ## Getting started
 
 ```sh
 # 1. Install Rust (rustup) if you haven't.
-# 2. (Optional) connect a real account:
-cp .env.example .env
-#    then put an Asana Personal Access Token in .env
+cargo run -- login        # connect your account, or…
+cargo run                 # …just run it (demo mode without a token)
 
-# 3. Run it.
-cargo run
+# A token can also come from the environment instead of the keychain:
+cp .env.example .env      # then put an Asana PAT in .env
 ```
-
-Without a token, Ninjasana runs in offline **demo mode** so you can click around.
 
 ### Controls
 
 | Input | Action |
 | --- | --- |
-| Click a view | Switch the sidebar view |
-| Click a task | Select it |
+| Click a nav entry | Switch list (My Tasks / a project) |
+| Click a task | Open its detail pane |
 | Scroll wheel | Scroll the task list |
-| ↑/↓ or `j`/`k` | Move selection |
+| ↑/↓ or `j`/`k` | Move task selection |
 | Click **Quit** / `q` / `Esc` | Exit |
 
 ## License
