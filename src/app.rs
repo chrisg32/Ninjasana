@@ -93,12 +93,17 @@ pub enum Zone {
     Quit,
 }
 
-/// In-progress column resize.
+/// In-progress column resize. The dragged divider trades width with the column
+/// immediately to its right (`victim`), so the divider tracks the cursor. When
+/// the right neighbor is the flexible Name column, `victim` is `None` and that
+/// column simply absorbs the change.
 #[derive(Clone, Copy)]
 pub struct Resize {
     col: usize,
     start_x: u16,
     start_width: usize,
+    victim: Option<usize>,
+    victim_start_width: usize,
 }
 
 /// The set of clickable regions for the current frame. Rebuilt every render.
@@ -556,12 +561,20 @@ impl App {
                     return;
                 }
                 match zone {
-                    // A column divider arms a resize.
+                    // A column divider arms a resize. The right neighbor is the
+                    // victim unless it's the flexible Name column (which absorbs).
                     Zone::ResizeHandle(col) => {
+                        let victim = self
+                            .columns
+                            .get(col + 1)
+                            .filter(|c| !c.is_name())
+                            .map(|_| col + 1);
                         self.resize = Some(Resize {
                             col,
                             start_x: mouse.column,
                             start_width: self.effective_width(col),
+                            victim,
+                            victim_start_width: victim.map(|v| self.effective_width(v)).unwrap_or(0),
                         });
                     }
                     // Pressing a task row selects it and arms a potential
@@ -579,11 +592,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(resize) = self.resize {
-                    let delta = mouse.column as i32 - resize.start_x as i32;
-                    let width = (resize.start_width as i32 + delta).max(MIN_COL_WIDTH as i32) as usize;
-                    let key = self.columns[resize.col].key();
-                    self.ui_state.set_column_width(&key, width);
-                    self.status = format!("{} width: {width}", self.columns[resize.col].title());
+                    self.apply_resize(resize, mouse.column);
                 } else if self.drag.is_some() {
                     let target = self.zones.drop_target(mouse.column, mouse.row);
                     if let Some(drag) = self.drag.as_mut() {
@@ -1532,6 +1541,36 @@ impl App {
                     .unwrap_or_else(|| c.width())
             })
             .unwrap_or(MIN_COL_WIDTH)
+    }
+
+    /// Apply a resize drag: grow/shrink the dragged column to follow the cursor,
+    /// trading width with its right neighbor (or letting the flex column absorb).
+    fn apply_resize(&mut self, resize: Resize, cursor_x: u16) {
+        let min = MIN_COL_WIDTH as i32;
+        let delta = cursor_x as i32 - resize.start_x as i32;
+        let mut new_col = (resize.start_width as i32 + delta).max(min);
+
+        let col_key = self.columns[resize.col].key();
+        match resize.victim {
+            Some(victim) => {
+                // Trade with the right neighbor, keeping it at or above the min.
+                let max_take = (resize.victim_start_width as i32 - min).max(0);
+                let mut change = new_col - resize.start_width as i32;
+                if change > max_take {
+                    change = max_take;
+                    new_col = resize.start_width as i32 + change;
+                }
+                let new_victim = resize.victim_start_width as i32 - change;
+                let victim_key = self.columns[victim].key();
+                self.ui_state.set_column_width(&col_key, new_col as usize);
+                self.ui_state.set_column_width(&victim_key, new_victim as usize);
+            }
+            None => {
+                // The flexible Name column to the right absorbs the change.
+                self.ui_state.set_column_width(&col_key, new_col as usize);
+            }
+        }
+        self.status = format!("{} width: {new_col}", self.columns[resize.col].title());
     }
 
     /// Stable per-list key for the collapse store.

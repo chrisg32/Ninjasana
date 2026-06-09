@@ -150,7 +150,7 @@ ninjasana --help          # full help
 | Click a section header | Collapse / expand the section (remembered between runs) |
 | Click a task row | Open its detail pane (never completes the task) |
 | **Drag a task row** | Reorder within / across sections |
-| **Drag a column divider** (`│`) | Resize that column |
+| **Drag a column divider** (`│`) | Resize the column on its left (trading width with the neighbor on its right) |
 | Scroll wheel | Scroll whichever region is under the cursor (task list, or the detail pane's Description / Properties / Subtasks / Conversation) |
 | ↑ / ↓ or `j` / `k` | Move task selection |
 | `b` | Collapse / expand the navigation sidebar |
