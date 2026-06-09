@@ -5,14 +5,16 @@
 //! which [`DataEnvelope`] models generically. Most endpoints return minimal
 //! fields unless asked, so we pass `opt_fields` on the requests that need more.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::config::Config;
 
-/// Identifies which task list a set of tasks belongs to, so the UI can ignore
-/// responses that arrive after the user has navigated elsewhere.
+/// Identifies which task list a set of sections belongs to, so the UI can
+/// ignore responses that arrive after the user has navigated elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskListKey {
     MyTasks,
@@ -22,16 +24,16 @@ pub enum TaskListKey {
 /// A result handed back to the UI thread from an async Asana call.
 #[derive(Debug, Clone)]
 pub enum AsanaUpdate {
-    /// Initial load: identity, workspace, and the project list.
+    /// Initial load: identity, workspace, and the member-project list.
     Bootstrap {
         user: User,
         workspace: Workspace,
         projects: Vec<Project>,
     },
-    /// Tasks for a given list (My Tasks or a project).
+    /// Section-grouped tasks for a given list.
     Tasks {
         key: TaskListKey,
-        tasks: Vec<Task>,
+        sections: Vec<Section>,
     },
     /// Full detail for a single task.
     Detail(TaskDetail),
@@ -57,10 +59,50 @@ pub struct Workspace {
     pub name: String,
 }
 
+/// A compact `{ "name": ... }` reference (assignee, project, …).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Named {
+    #[serde(default)]
+    pub name: String,
+}
+
+/// A compact `{ "gid": ... }` reference (e.g. a project member).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Ref {
+    pub gid: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Project {
     pub gid: String,
     pub name: String,
+    #[serde(default)]
+    pub members: Vec<Ref>,
+}
+
+/// A section reference, with its position-defining gid.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SectionRef {
+    pub gid: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// A task's membership in a project.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Membership {
+    #[serde(default)]
+    pub project: Option<Named>,
+}
+
+/// A custom field on a task. `display_value` is Asana's rendered value for any
+/// field type (enum, text, number, …), so we can show it without type logic.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomField {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,12 +111,55 @@ pub struct Task {
     pub name: String,
     #[serde(default)]
     pub completed: bool,
+    #[serde(default)]
+    pub due_on: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<Named>,
+    /// Present on My Tasks results: the section within the user's task list.
+    #[serde(default)]
+    pub assignee_section: Option<Named>,
+    #[serde(default)]
+    pub memberships: Vec<Membership>,
+    #[serde(default)]
+    pub tags: Vec<Named>,
+    #[serde(default)]
+    pub custom_fields: Vec<CustomField>,
 }
 
-/// A nested `{ "name": ... }` object (e.g. an assignee).
-#[derive(Debug, Clone, Deserialize)]
-pub struct Named {
+impl Task {
+    /// Names of the projects this task belongs to.
+    pub fn project_names(&self) -> Vec<String> {
+        self.memberships
+            .iter()
+            .filter_map(|m| m.project.as_ref().map(|p| p.name.clone()))
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    /// Names of the tags on this task.
+    pub fn tag_names(&self) -> Vec<String> {
+        self.tags
+            .iter()
+            .map(|t| t.name.clone())
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    /// The display value of a named custom field (e.g. "Dev Status v2"), if set.
+    pub fn custom_field(&self, name: &str) -> Option<String> {
+        self.custom_fields
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.display_value.clone())
+            .filter(|v| !v.is_empty())
+    }
+}
+
+/// A named group of tasks, in display order.
+#[derive(Debug, Clone)]
+pub struct Section {
     pub name: String,
+    pub tasks: Vec<Task>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +175,14 @@ pub struct TaskDetail {
     pub due_on: Option<String>,
     pub permalink_url: Option<String>,
 }
+
+/// `{ "gid": ... }` for the user's task list.
+#[derive(Debug, Clone, Deserialize)]
+struct UserTaskList {
+    gid: String,
+}
+
+const NO_SECTION: &str = "(No section)";
 
 #[derive(Clone)]
 pub struct Client {
@@ -148,40 +241,91 @@ impl Client {
         self.get("workspaces", &[("limit", "100")]).await
     }
 
-    pub async fn projects(&self, workspace_gid: &str) -> Result<Vec<Project>> {
-        self.get(
-            "projects",
-            &[
-                ("workspace", workspace_gid),
-                ("archived", "false"),
-                ("limit", "100"),
-                ("opt_fields", "name"),
-            ],
-        )
-        .await
+    /// Projects in the workspace that the user is a member of — mirrors the
+    /// "Projects" section of Asana's web sidebar.
+    pub async fn member_projects(&self, workspace_gid: &str, user_gid: &str) -> Result<Vec<Project>> {
+        let projects: Vec<Project> = self
+            .get(
+                "projects",
+                &[
+                    ("workspace", workspace_gid),
+                    ("archived", "false"),
+                    ("limit", "100"),
+                    ("opt_fields", "name,members"),
+                ],
+            )
+            .await?;
+        Ok(projects
+            .into_iter()
+            .filter(|p| p.members.iter().any(|m| m.gid == user_gid))
+            .collect())
     }
 
-    pub async fn tasks_in_project(&self, project_gid: &str) -> Result<Vec<Task>> {
-        self.get(
-            &format!("projects/{project_gid}/tasks"),
-            &[("limit", "100"), ("opt_fields", "name,completed")],
-        )
-        .await
+    /// Section-grouped tasks for a project, in the project's section order.
+    pub async fn project_sections(&self, project_gid: &str) -> Result<Vec<Section>> {
+        let sections: Vec<SectionRef> = self
+            .get(
+                &format!("projects/{project_gid}/sections"),
+                &[("opt_fields", "name"), ("limit", "100")],
+            )
+            .await?;
+
+        let mut out = Vec::with_capacity(sections.len());
+        for section in sections {
+            let tasks: Vec<Task> = self
+                .get(
+                    &format!("sections/{}/tasks", section.gid),
+                    &[
+                        ("limit", "100"),
+                        (
+                            "opt_fields",
+                            "name,completed,due_on,assignee.name,memberships.project.name,\
+                             tags.name,custom_fields.name,custom_fields.display_value",
+                        ),
+                    ],
+                )
+                .await
+                .unwrap_or_default();
+            let name = if section.name.is_empty() {
+                NO_SECTION.to_string()
+            } else {
+                section.name
+            };
+            out.push(Section { name, tasks });
+        }
+        Ok(out)
     }
 
-    /// Incomplete tasks assigned to the user in the given workspace.
-    pub async fn my_tasks(&self, workspace_gid: &str, user_gid: &str) -> Result<Vec<Task>> {
-        self.get(
-            "tasks",
-            &[
-                ("assignee", user_gid),
-                ("workspace", workspace_gid),
-                ("completed_since", "now"),
-                ("limit", "100"),
-                ("opt_fields", "name,completed"),
-            ],
-        )
-        .await
+    /// Section-grouped "My Tasks" for the user, in My Tasks display order.
+    pub async fn my_tasks_sections(
+        &self,
+        workspace_gid: &str,
+        user_gid: &str,
+    ) -> Result<Vec<Section>> {
+        let utl: UserTaskList = self
+            .get(
+                &format!("users/{user_gid}/user_task_list"),
+                &[("workspace", workspace_gid)],
+            )
+            .await?;
+
+        let tasks: Vec<Task> = self
+            .get(
+                &format!("user_task_lists/{}/tasks", utl.gid),
+                &[
+                    ("completed_since", "now"),
+                    ("limit", "100"),
+                    (
+                        "opt_fields",
+                        "name,completed,due_on,assignee.name,assignee_section.name,\
+                         memberships.project.name,tags.name,custom_fields.name,\
+                         custom_fields.display_value",
+                    ),
+                ],
+            )
+            .await?;
+
+        Ok(group_by_assignee_section(tasks))
     }
 
     pub async fn task(&self, gid: &str) -> Result<TaskDetail> {
@@ -194,4 +338,32 @@ impl Client {
         )
         .await
     }
+}
+
+/// Group My Tasks by their assignee-section, preserving the order in which the
+/// sections first appear (which matches the user's My Tasks ordering).
+fn group_by_assignee_section(tasks: Vec<Task>) -> Vec<Section> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<Task>> = HashMap::new();
+
+    for task in tasks {
+        let name = task
+            .assignee_section
+            .as_ref()
+            .map(|s| s.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| NO_SECTION.to_string());
+        if !groups.contains_key(&name) {
+            order.push(name.clone());
+        }
+        groups.entry(name).or_default().push(task);
+    }
+
+    order
+        .into_iter()
+        .map(|name| {
+            let tasks = groups.remove(&name).unwrap_or_default();
+            Section { name, tasks }
+        })
+        .collect()
 }

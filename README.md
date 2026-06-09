@@ -31,8 +31,12 @@ ninjasana logout     # remove the stored token
 
 The full view mirrors how Asana looks in the browser:
 
-- **Left** — navigation: *My Tasks* pinned on top, then your projects.
-- **Middle** — the tasks in the selected list.
+- **Left** — navigation: *My Tasks* pinned on top, then the projects you're a
+  member of.
+- **Middle** — the selected list's tasks, grouped into collapsible **sections**
+  in Asana's order, shown as a table: Name · Due Date · Dev Status v2 · Tags ·
+  Projects. Tasks show an open circle (`○`) and **cannot be completed by
+  clicking** — clicking a row only opens its detail.
 - **Right** — task detail, shown only once a task is selected.
 
 ## Status
@@ -67,7 +71,8 @@ cp .env.example .env      # then put an Asana PAT in .env
 | Input | Action |
 | --- | --- |
 | Click a nav entry | Switch list (My Tasks / a project) |
-| Click a task | Open its detail pane |
+| Click a section header | Collapse / expand the section |
+| Click a task row | Open its detail pane (never completes the task) |
 | Scroll wheel | Scroll the task list |
 | ↑/↓ or `j`/`k` | Move task selection |
 | Click **Quit** / `q` / `Esc` | Exit |

@@ -11,6 +11,38 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 use crate::app::{App, AppMode, Nav, Zone};
 
 const ACCENT: Color = Color::Cyan;
+const DEV_STATUS_FIELD: &str = "Dev Status v2";
+
+/// One row of the middle pane: a section header or a task within a section.
+enum Row {
+    Header(usize),
+    Task(usize, usize),
+}
+
+/// Fixed widths for the metadata columns; Name flexes to fill the rest.
+struct Columns {
+    name: usize,
+    due: usize,
+    dev: usize,
+    tags: usize,
+    projects: usize,
+}
+
+impl Columns {
+    fn for_width(total: usize) -> Self {
+        let (due, dev, tags, projects) = (10, 16, 18, 22);
+        // 2 cols for the status mark + 5 single-space separators.
+        let fixed = 2 + 5 + due + dev + tags + projects;
+        let name = total.saturating_sub(fixed).max(12);
+        Self {
+            name,
+            due,
+            dev,
+            tags,
+            projects,
+        }
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     app.zones.clear();
@@ -31,15 +63,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_full_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    let show_detail = app.selected_task.is_some();
+    let show_detail = app.selected.is_some();
     let layout = if show_detail {
         Layout::horizontal([
             Constraint::Length(28),
-            Constraint::Min(20),
+            Constraint::Min(40),
             Constraint::Length(46),
         ])
     } else {
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(20)])
+        Layout::horizontal([Constraint::Length(28), Constraint::Min(40)])
     };
     let chunks = layout.split(area);
 
@@ -98,7 +130,6 @@ fn render_nav(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Build the nav entries: My Tasks pinned on top, then projects.
     let mut entries: Vec<(Nav, String)> = vec![(Nav::MyTasks, "★ My Tasks".to_string())];
     for (i, project) in app.projects.iter().enumerate() {
         entries.push((Nav::Project(i), format!("# {}", project.name)));
@@ -115,8 +146,7 @@ fn render_nav(frame: &mut Frame, app: &mut App, area: Rect) {
             width: inner.width,
             height: 1,
         };
-        let selected = nav == app.nav;
-        let style = if selected {
+        let style = if nav == app.nav {
             Style::new()
                 .fg(Color::Black)
                 .bg(ACCENT)
@@ -124,7 +154,7 @@ fn render_nav(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Style::new()
         };
-        frame.render_widget(Paragraph::new(format!(" {label}")).style(style), rect);
+        frame.render_widget(Paragraph::new(fit(&format!(" {label}"), inner.width as usize)).style(style), rect);
         app.zones.push(Zone::Nav(nav), rect);
     }
 }
@@ -136,50 +166,121 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.tasks.is_empty() {
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let cols = Columns::for_width(inner.width as usize);
+
+    // Column header row.
+    let header = format!(
+        "  {} {} {} {} {}",
+        fit("Name", cols.name),
+        fit("Due Date", cols.due),
+        fit(DEV_STATUS_FIELD, cols.dev),
+        fit("Tags", cols.tags),
+        fit("Projects", cols.projects),
+    );
+    frame.render_widget(
+        Paragraph::new(header).style(Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        Rect {
+            height: 1,
+            ..inner
+        },
+    );
+
+    let list_top = inner.y + 1;
+    let available = inner.height.saturating_sub(1) as usize;
+    app.viewport_rows = available;
+
+    if app.sections.is_empty() {
         frame.render_widget(
             Paragraph::new(" No tasks.").style(Style::new().fg(Color::DarkGray)),
-            inner,
+            Rect {
+                y: list_top,
+                height: 1,
+                ..inner
+            },
         );
         return;
     }
 
-    let height = inner.height as usize;
-    let start = app.task_scroll.min(app.tasks.len().saturating_sub(1));
+    // Flatten sections + visible tasks into virtual rows.
+    let mut rows: Vec<Row> = Vec::new();
+    for (si, section) in app.sections.iter().enumerate() {
+        rows.push(Row::Header(si));
+        if !section.collapsed {
+            for ti in 0..section.tasks.len() {
+                rows.push(Row::Task(si, ti));
+            }
+        }
+    }
 
-    for (offset, (index, task)) in app
-        .tasks
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .enumerate()
-    {
+    let start = app.scroll.min(rows.len().saturating_sub(1));
+    for (i, row) in rows.iter().enumerate().skip(start).take(available) {
         let rect = Rect {
             x: inner.x,
-            y: inner.y + offset as u16,
+            y: list_top + (i - start) as u16,
             width: inner.width,
             height: 1,
         };
-        let check = if task.completed { "[x]" } else { "[ ]" };
-        let label = format!(" {check} {}", task.name);
-
-        let style = if app.selected_task == Some(index) {
-            Style::new()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else if task.completed {
-            Style::new()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::CROSSED_OUT)
-        } else {
-            Style::new()
-        };
-
-        frame.render_widget(Paragraph::new(label).style(style), rect);
-        app.zones.push(Zone::TaskRow(index), rect);
+        match *row {
+            Row::Header(si) => render_section_header(frame, app, si, rect),
+            Row::Task(si, ti) => render_task_row(frame, app, si, ti, &cols, rect),
+        }
     }
+}
+
+fn render_section_header(frame: &mut Frame, app: &mut App, si: usize, rect: Rect) {
+    let section = &app.sections[si];
+    let chevron = if section.collapsed { "▸" } else { "▾" };
+    let label = format!(" {chevron} {} ({})", section.name, section.tasks.len());
+    frame.render_widget(
+        Paragraph::new(fit(&label, rect.width as usize)).style(
+            Style::new()
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED),
+        ),
+        rect,
+    );
+    app.zones.push(Zone::Section(si), rect);
+}
+
+fn render_task_row(frame: &mut Frame, app: &mut App, si: usize, ti: usize, cols: &Columns, rect: Rect) {
+    let task = &app.sections[si].tasks[ti];
+    let selected = app.selected == Some((si, ti));
+
+    let mark = if task.completed { "✔" } else { "○" };
+    let due = task.due_on.clone().unwrap_or_else(|| "—".to_string());
+    let dev = task.custom_field(DEV_STATUS_FIELD).unwrap_or_default();
+    let tags = task.tag_names().join(", ");
+    let projects = task.project_names().join(", ");
+
+    let line = format!(
+        "{mark} {} {} {} {} {}",
+        fit(&task.name, cols.name),
+        fit(&due, cols.due),
+        fit(&dev, cols.dev),
+        fit(&tags, cols.tags),
+        fit(&projects, cols.projects),
+    );
+
+    let style = if selected {
+        Style::new()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if task.completed {
+        Style::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::CROSSED_OUT)
+    } else {
+        Style::new()
+    };
+
+    frame.render_widget(Paragraph::new(line).style(style), rect);
+    app.zones.push(Zone::TaskRow(si, ti), rect);
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -241,7 +342,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints = match app.mode {
-        AppMode::Full => " click: open · scroll: list · ↑/↓ or j/k: move · q: quit ",
+        AppMode::Full => " click row: open · click section: collapse · scroll · ↑/↓: move · q: quit ",
         AppMode::TaskDetail(_) => " q: quit ",
     };
     let line = Line::from(vec![
@@ -253,4 +354,24 @@ fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(hints, Style::new().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Truncate (with an ellipsis) or pad `s` to exactly `width` display columns,
+/// counting by character (a good-enough proxy for mostly-ASCII task text).
+fn fit(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= width {
+        let mut out = s.to_string();
+        out.extend(std::iter::repeat_n(' ', width - chars.len()));
+        out
+    } else if width == 1 {
+        "…".to_string()
+    } else {
+        let mut out: String = chars[..width - 1].iter().collect();
+        out.push('…');
+        out
+    }
 }

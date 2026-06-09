@@ -16,7 +16,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::asana::{AsanaUpdate, Client, Named, Task, TaskDetail, TaskListKey};
+use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Task, TaskDetail, TaskListKey};
 use crate::event::{Event, EventBus};
 use crate::tui::Tui;
 use crate::ui;
@@ -41,7 +41,10 @@ pub enum Nav {
 #[derive(Clone, PartialEq)]
 pub enum Zone {
     Nav(Nav),
-    TaskRow(usize),
+    /// A section header — toggles collapse.
+    Section(usize),
+    /// A task row — `(section index, task index)`.
+    TaskRow(usize, usize),
     Quit,
 }
 
@@ -76,6 +79,13 @@ impl ZoneMap {
     }
 }
 
+/// A section plus its UI-only collapsed state.
+pub struct SectionView {
+    pub name: String,
+    pub tasks: Vec<Task>,
+    pub collapsed: bool,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub running: bool,
@@ -89,13 +99,16 @@ pub struct App {
     pub user_name: Option<String>,
 
     // Left pane.
-    pub projects: Vec<crate::asana::Project>,
+    pub projects: Vec<Project>,
     pub nav: Nav,
 
     // Middle pane.
-    pub tasks: Vec<Task>,
-    pub task_scroll: usize,
-    pub selected_task: Option<usize>,
+    pub sections: Vec<SectionView>,
+    pub scroll: usize,
+    /// `(section index, task index)` of the selected task.
+    pub selected: Option<(usize, usize)>,
+    /// Number of task/header rows the middle pane can show; set each render.
+    pub viewport_rows: usize,
 
     // Right pane.
     pub detail: Option<TaskDetail>,
@@ -120,9 +133,10 @@ impl App {
             user_name: None,
             projects: Vec::new(),
             nav: Nav::MyTasks,
-            tasks: Vec::new(),
-            task_scroll: 0,
-            selected_task: None,
+            sections: Vec::new(),
+            scroll: 0,
+            selected: None,
+            viewport_rows: 0,
             detail: None,
             detail_loading: false,
             status: String::new(),
@@ -213,8 +227,8 @@ impl App {
                     self.activate(zone);
                 }
             }
-            MouseEventKind::ScrollDown => self.task_scroll = self.task_scroll.saturating_add(1),
-            MouseEventKind::ScrollUp => self.task_scroll = self.task_scroll.saturating_sub(1),
+            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_add(1),
+            MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_sub(1),
             _ => {}
         }
     }
@@ -222,7 +236,12 @@ impl App {
     fn activate(&mut self, zone: Zone) {
         match zone {
             Zone::Nav(nav) => self.select_nav(nav),
-            Zone::TaskRow(index) => self.select_task(index),
+            Zone::Section(index) => {
+                if let Some(section) = self.sections.get_mut(index) {
+                    section.collapsed = !section.collapsed;
+                }
+            }
+            Zone::TaskRow(section, task) => self.select_task(section, task),
             Zone::Quit => self.running = false,
         }
     }
@@ -241,14 +260,12 @@ impl App {
                 self.projects = projects;
                 self.load_tasks_for(self.nav);
             }
-            AsanaUpdate::Tasks { key, tasks } => {
+            AsanaUpdate::Tasks { key, sections } => {
                 // Ignore responses for a list the user has since navigated away from.
                 if self.current_key() == key {
-                    self.tasks = tasks;
-                    self.task_scroll = 0;
-                    self.selected_task = None;
-                    self.detail = None;
-                    self.status = format!("{} — {} task(s).", self.nav_title(), self.tasks.len());
+                    let count: usize = sections.iter().map(|s| s.tasks.len()).sum();
+                    self.set_sections(sections);
+                    self.status = format!("{} — {count} task(s).", self.nav_title());
                 }
             }
             AsanaUpdate::Detail(detail) => {
@@ -266,43 +283,55 @@ impl App {
 
     fn select_nav(&mut self, nav: Nav) {
         self.nav = nav;
-        self.selected_task = None;
+        self.sections.clear();
+        self.selected = None;
         self.detail = None;
-        self.tasks.clear();
+        self.scroll = 0;
         if self.client.is_some() {
             self.status = format!("Loading {}…", self.nav_title());
             self.load_tasks_for(nav);
         } else {
-            self.tasks = demo_tasks_for(nav, &self.projects);
-            self.status = format!("{} — {} task(s).", self.nav_title(), self.tasks.len());
+            self.set_sections(demo_sections_for(nav, &self.projects));
+            let count: usize = self.sections.iter().map(|s| s.tasks.len()).sum();
+            self.status = format!("{} — {count} task(s).", self.nav_title());
         }
     }
 
-    fn select_task(&mut self, index: usize) {
-        let Some(task) = self.tasks.get(index).cloned() else {
+    fn select_task(&mut self, section: usize, task: usize) {
+        let Some(task_obj) = self
+            .sections
+            .get(section)
+            .and_then(|s| s.tasks.get(task))
+            .cloned()
+        else {
             return;
         };
-        self.selected_task = Some(index);
-        self.status = format!("Selected: {}", task.name);
+        self.selected = Some((section, task));
+        self.status = format!("Selected: {}", task_obj.name);
+        self.ensure_visible();
         if self.client.is_some() {
             self.detail = None;
             self.detail_loading = true;
-            self.load_detail(task.gid);
+            self.load_detail(task_obj.gid);
         } else {
-            self.detail = Some(demo_detail(&task));
+            self.detail = Some(demo_detail(&task_obj));
         }
     }
 
     fn select_task_delta(&mut self, delta: isize) {
-        if self.tasks.is_empty() {
+        let visible = self.visible_tasks();
+        if visible.is_empty() {
             return;
         }
-        let last = self.tasks.len() - 1;
-        let next = match self.selected_task {
-            Some(i) => (i as isize + delta).clamp(0, last as isize) as usize,
+        let current = self
+            .selected
+            .and_then(|sel| visible.iter().position(|p| *p == sel));
+        let next = match current {
+            Some(i) => (i as isize + delta).clamp(0, visible.len() as isize - 1) as usize,
             None => 0,
         };
-        self.select_task(next);
+        let (section, task) = visible[next];
+        self.select_task(section, task);
     }
 
     // ---- async loaders -------------------------------------------------
@@ -324,13 +353,13 @@ impl App {
         tokio::spawn(async move {
             let result = match &key {
                 TaskListKey::MyTasks => match (workspace, user) {
-                    (Some(w), Some(u)) => client.my_tasks(&w, &u).await,
+                    (Some(w), Some(u)) => client.my_tasks_sections(&w, &u).await,
                     _ => Err(anyhow::anyhow!("workspace/user not ready")),
                 },
-                TaskListKey::Project(gid) => client.tasks_in_project(gid).await,
+                TaskListKey::Project(gid) => client.project_sections(gid).await,
             };
             let update = match result {
-                Ok(tasks) => AsanaUpdate::Tasks { key, tasks },
+                Ok(sections) => AsanaUpdate::Tasks { key, sections },
                 Err(err) => AsanaUpdate::Error(format!("{err:#}")),
             };
             let _ = tx.send(Event::Asana(update));
@@ -352,6 +381,68 @@ impl App {
     }
 
     // ---- helpers -------------------------------------------------------
+
+    fn set_sections(&mut self, sections: Vec<Section>) {
+        self.sections = sections
+            .into_iter()
+            .map(|s| SectionView {
+                name: s.name,
+                tasks: s.tasks,
+                collapsed: false,
+            })
+            .collect();
+        self.scroll = 0;
+        self.selected = None;
+        self.detail = None;
+    }
+
+    /// Flattened `(section, task)` indices that are currently visible (i.e. not
+    /// inside a collapsed section).
+    fn visible_tasks(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (si, section) in self.sections.iter().enumerate() {
+            if section.collapsed {
+                continue;
+            }
+            for ti in 0..section.tasks.len() {
+                out.push((si, ti));
+            }
+        }
+        out
+    }
+
+    /// The virtual row index (counting section headers and visible tasks) of a
+    /// given task, used to keep the selection on screen.
+    fn row_index_of(&self, target: (usize, usize)) -> Option<usize> {
+        let mut row = 0;
+        for (si, section) in self.sections.iter().enumerate() {
+            row += 1; // header
+            if section.collapsed {
+                continue;
+            }
+            for ti in 0..section.tasks.len() {
+                if (si, ti) == target {
+                    return Some(row);
+                }
+                row += 1;
+            }
+        }
+        None
+    }
+
+    fn ensure_visible(&mut self) {
+        let Some(sel) = self.selected else {
+            return;
+        };
+        let Some(row) = self.row_index_of(sel) else {
+            return;
+        };
+        if row < self.scroll {
+            self.scroll = row;
+        } else if self.viewport_rows > 0 && row >= self.scroll + self.viewport_rows {
+            self.scroll = row + 1 - self.viewport_rows;
+        }
+    }
 
     fn current_key(&self) -> TaskListKey {
         match self.nav {
@@ -378,7 +469,7 @@ impl App {
 
     fn load_demo(&mut self) {
         self.projects = demo_projects();
-        self.tasks = demo_tasks_for(Nav::MyTasks, &self.projects);
+        self.set_sections(demo_sections_for(Nav::MyTasks, &self.projects));
         self.status =
             "Demo mode — no token set. Run `ninjasana login`. Click around; q to quit.".into();
     }
@@ -386,47 +477,84 @@ impl App {
 
 // ---- demo data (offline mode) -----------------------------------------
 
-fn demo_projects() -> Vec<crate::asana::Project> {
+fn demo_projects() -> Vec<Project> {
     ["Ninjasana", "Website Redesign", "Q3 Roadmap"]
         .into_iter()
         .enumerate()
-        .map(|(i, name)| crate::asana::Project {
+        .map(|(i, name)| Project {
             gid: format!("demo-{i}"),
             name: name.to_string(),
+            members: Vec::new(),
         })
         .collect()
 }
 
-fn demo_tasks_for(nav: Nav, projects: &[crate::asana::Project]) -> Vec<Task> {
-    let names: &[(&str, bool)] = match nav {
-        Nav::MyTasks => &[
-            ("Pick the language (Rust + Ratatui)", true),
-            ("Create the private GitHub repo", true),
-            ("Scaffold the mouse zone system", true),
-            ("Wire up PAT login", false),
-            ("Render real My Tasks from the API", false),
-            ("Browser OAuth login", false),
+fn demo_task(gid: &str, name: &str, completed: bool, due: Option<&str>) -> Task {
+    use crate::asana::CustomField;
+    Task {
+        gid: gid.to_string(),
+        name: name.to_string(),
+        completed,
+        due_on: due.map(str::to_string),
+        assignee: Some(Named {
+            name: "You (demo)".to_string(),
+        }),
+        assignee_section: None,
+        memberships: Vec::new(),
+        tags: vec![Named {
+            name: "demo".to_string(),
+        }],
+        custom_fields: vec![CustomField {
+            name: "Dev Status v2".to_string(),
+            display_value: Some(if completed {
+                "Done".to_string()
+            } else {
+                "2. Development".to_string()
+            }),
+        }],
+    }
+}
+
+fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
+    match nav {
+        Nav::MyTasks => vec![
+            Section {
+                name: "Now".to_string(),
+                tasks: vec![
+                    demo_task("d-now-0", "Wire up PAT login", true, None),
+                    demo_task("d-now-1", "Render My Tasks with sections", false, Some("2026-06-12")),
+                ],
+            },
+            Section {
+                name: "Later".to_string(),
+                tasks: vec![
+                    demo_task("d-later-0", "Browser OAuth login", false, None),
+                    demo_task("d-later-1", "Drag-to-reorder rows", false, Some("2026-07-01")),
+                ],
+            },
         ],
-        Nav::Project(0) => &[
-            ("Three-pane layout", false),
-            ("Drag-to-reorder task rows", false),
-            ("Right-click context menus", false),
-        ],
-        _ => &[("Sample task A", false), ("Sample task B", true)],
-    };
-    let prefix = match nav {
-        Nav::Project(i) => projects.get(i).map(|p| p.name.as_str()).unwrap_or("Project"),
-        Nav::MyTasks => "me",
-    };
-    names
-        .iter()
-        .enumerate()
-        .map(|(i, (name, completed))| Task {
-            gid: format!("demo-{prefix}-{i}"),
-            name: name.to_string(),
-            completed: *completed,
-        })
-        .collect()
+        Nav::Project(i) => {
+            let prefix = projects.get(i).map(|p| p.name.as_str()).unwrap_or("Project");
+            vec![
+                Section {
+                    name: "To do".to_string(),
+                    tasks: vec![
+                        demo_task(&format!("d-{prefix}-0"), "Three-pane layout", true, None),
+                        demo_task(&format!("d-{prefix}-1"), "Collapsible sections", false, None),
+                    ],
+                },
+                Section {
+                    name: "Done".to_string(),
+                    tasks: vec![demo_task(
+                        &format!("d-{prefix}-2"),
+                        "Pick the language",
+                        true,
+                        None,
+                    )],
+                },
+            ]
+        }
+    }
 }
 
 fn demo_detail(task: &Task) -> TaskDetail {
@@ -437,21 +565,15 @@ fn demo_detail(task: &Task) -> TaskDetail {
         notes: "This is demo detail. Connect a real account with `ninjasana login` to see \
                 live task notes, assignee, and due date."
             .to_string(),
-        assignee: Some(Named {
-            name: "You (demo)".to_string(),
-        }),
-        due_on: Some("2026-06-30".to_string()),
+        assignee: task.assignee.clone(),
+        due_on: task.due_on.clone(),
         permalink_url: None,
     }
 }
 
 async fn bootstrap(
     client: &Client,
-) -> Result<(
-    crate::asana::User,
-    crate::asana::Workspace,
-    Vec<crate::asana::Project>,
-)> {
+) -> Result<(crate::asana::User, crate::asana::Workspace, Vec<Project>)> {
     let user = client.me().await?;
     let workspace = client
         .workspaces()
@@ -459,6 +581,6 @@ async fn bootstrap(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("your account has no workspaces"))?;
-    let projects = client.projects(&workspace.gid).await?;
+    let projects = client.member_projects(&workspace.gid, &user.gid).await?;
     Ok((user, workspace, projects))
 }
