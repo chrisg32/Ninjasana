@@ -69,21 +69,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_full_body(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_detail = app.selected.is_some();
-    let layout = if show_detail {
-        Layout::horizontal([
-            Constraint::Length(28),
-            Constraint::Min(40),
-            Constraint::Length(46),
-        ])
-    } else {
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(40)])
-    };
-    let chunks = layout.split(area);
+    let show_nav = !app.nav_collapsed;
 
-    render_nav(frame, app, chunks[0]);
-    render_tasks(frame, app, chunks[1]);
+    let mut constraints = Vec::new();
+    if show_nav {
+        constraints.push(Constraint::Length(28));
+    }
+    constraints.push(Constraint::Min(40));
     if show_detail {
-        render_detail(frame, app, chunks[2]);
+        constraints.push(Constraint::Length(46));
+    }
+    let chunks = Layout::horizontal(constraints).split(area);
+
+    let mut idx = 0;
+    if show_nav {
+        render_nav(frame, app, chunks[idx]);
+        idx += 1;
+    }
+    render_tasks(frame, app, chunks[idx]);
+    idx += 1;
+    if show_detail {
+        render_detail(frame, app, chunks[idx]);
     }
 }
 
@@ -1036,7 +1042,7 @@ fn format_time(iso: &str) -> String {
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints = match app.mode {
         AppMode::Full => {
-            " click: open · drag row: reorder · drag │: resize · click section: collapse · ↑/↓: move · q: quit "
+            " click: open · drag row: reorder · drag │: resize · ↑/↓: move · ^B: nav · q: quit "
         }
         AppMode::TaskDetail(_) => " q: quit ",
     };

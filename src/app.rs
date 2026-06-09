@@ -292,6 +292,8 @@ pub struct App {
     /// Whether to draw the top header / bottom status bars.
     pub show_header: bool,
     pub show_footer: bool,
+    /// Whether the navigation sidebar is collapsed (toggle with Ctrl+B).
+    pub nav_collapsed: bool,
 
     /// Columns shown in the task table, from the user's config.
     pub columns: Vec<Column>,
@@ -365,6 +367,7 @@ impl App {
             detail_cfg,
             show_header,
             show_footer,
+            nav_collapsed: false,
             columns,
             project_source,
             drag: None,
@@ -501,6 +504,9 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.running = false
+            }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.nav_collapsed = !self.nav_collapsed;
             }
             KeyCode::Down | KeyCode::Char('j') => self.select_task_delta(1),
             KeyCode::Up | KeyCode::Char('k') => self.select_task_delta(-1),
