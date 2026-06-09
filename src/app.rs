@@ -505,9 +505,7 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.running = false
             }
-            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.nav_collapsed = !self.nav_collapsed;
-            }
+            KeyCode::Char('b') => self.nav_collapsed = !self.nav_collapsed,
             KeyCode::Down | KeyCode::Char('j') => self.select_task_delta(1),
             KeyCode::Up | KeyCode::Char('k') => self.select_task_delta(-1),
             _ => {}

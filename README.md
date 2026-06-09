@@ -153,7 +153,7 @@ ninjasana --help          # full help
 | **Drag a column divider** (`│`) | Resize that column |
 | Scroll wheel | Scroll whichever region is under the cursor (task list, or the detail pane's Description / Properties / Subtasks / Conversation) |
 | ↑ / ↓ or `j` / `k` | Move task selection |
-| `Ctrl+B` | Collapse / expand the navigation sidebar |
+| `b` | Collapse / expand the navigation sidebar |
 | Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
 | Click **Copy Link** | Copy the task's URL to the clipboard |
 | Click **Comments** / **All activity** | Switch the conversation tab |

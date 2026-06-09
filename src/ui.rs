@@ -1042,7 +1042,7 @@ fn format_time(iso: &str) -> String {
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints = match app.mode {
         AppMode::Full => {
-            " click: open · drag row: reorder · drag │: resize · ↑/↓: move · ^B: nav · q: quit "
+            " click: open · drag row: reorder · drag │: resize · ↑/↓: move · b: nav · q: quit "
         }
         AppMode::TaskDetail(_) => " q: quit ",
     };
