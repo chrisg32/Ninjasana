@@ -507,3 +507,54 @@ fn group_by_assignee_section(tasks: Vec<Task>) -> Vec<Section> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{group_by_assignee_section, Task};
+
+    #[test]
+    fn groups_my_tasks_by_assignee_section_in_first_seen_order() {
+        // Shaped like a real /user_task_lists/{}/tasks response.
+        let json = r#"[
+            {"gid":"1","name":"A","assignee_section":{"gid":"s1","name":"Now"}},
+            {"gid":"2","name":"B","assignee_section":{"gid":"s2","name":"Today"}},
+            {"gid":"3","name":"C","assignee_section":{"gid":"s1","name":"Now"}},
+            {"gid":"4","name":"D"}
+        ]"#;
+        let tasks: Vec<Task> = serde_json::from_str(json).unwrap();
+        let sections = group_by_assignee_section(tasks);
+
+        // Section order follows first appearance; unsectioned tasks bucket last.
+        let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["Now", "Today", "(No section)"]);
+
+        // Sections carry their gid (used to persist moves); synthetic one has none.
+        assert_eq!(sections[0].gid.as_deref(), Some("s1"));
+        assert_eq!(sections[2].gid, None);
+
+        // Tasks land in the right group, in order.
+        let now: Vec<&str> = sections[0].tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(now, vec!["A", "C"]);
+        assert_eq!(sections[1].tasks.len(), 1);
+        assert_eq!(sections[2].tasks[0].name, "D");
+    }
+
+    #[test]
+    fn task_accessors_read_tags_and_custom_fields() {
+        let json = r#"{
+            "gid":"9","name":"T","completed":false,
+            "tags":[{"name":"infra"},{"name":"urgent"}],
+            "custom_fields":[
+                {"name":"Dev Status v2","display_value":"2. Development"},
+                {"name":"Empty","display_value":null}
+            ],
+            "memberships":[{"project":{"name":"Chateau"}}]
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.tag_names(), vec!["infra", "urgent"]);
+        assert_eq!(task.project_names(), vec!["Chateau"]);
+        assert_eq!(task.custom_field("Dev Status v2").as_deref(), Some("2. Development"));
+        assert_eq!(task.custom_field("Empty"), None);
+        assert_eq!(task.custom_field("Missing"), None);
+    }
+}

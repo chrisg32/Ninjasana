@@ -1,5 +1,7 @@
 //! Secure storage for the Asana Personal Access Token, backed by the OS
-//! keychain (macOS Keychain via the `keyring` crate's Apple-native backend).
+//! keychain via the `keyring` crate. The platform-native backend is selected
+//! at build time (see Cargo.toml): macOS Keychain, Windows Credential Manager,
+//! or the Linux Secret Service.
 
 use anyhow::{Context, Result};
 use keyring::Entry;

@@ -460,39 +460,18 @@ impl App {
     /// expect); dropping above inserts before; dropping on a header goes to the
     /// top of that section.
     fn apply_reorder(&mut self, from: (usize, usize), target: DropTarget) {
-        let (fs, ft) = from;
-        if fs >= self.sections.len() || ft >= self.sections[fs].tasks.len() {
+        let layout: Vec<(usize, bool)> = self
+            .sections
+            .iter()
+            .map(|s| (s.tasks.len(), s.collapsed))
+            .collect();
+        let Some((ts, tb)) = resolve_drop(&layout, from, target) else {
             return;
-        }
-
-        let (ts, raw) = match target {
-            DropTarget::SectionTop(s) => (s, 0),
-            DropTarget::Task(s, h) => {
-                let dragging_down = matches!(
-                    (self.row_index_of((fs, ft)), self.row_index_of((s, h))),
-                    (Some(src), Some(tgt)) if tgt > src
-                );
-                (s, if dragging_down { h + 1 } else { h })
-            }
         };
-        if ts >= self.sections.len() {
-            return;
-        }
 
+        let (fs, ft) = from;
         let task = self.sections[fs].tasks.remove(ft);
-        // Removing an earlier index in the same section shifts the target left.
-        let mut tb = raw;
-        if fs == ts && tb > ft {
-            tb -= 1;
-        }
-        tb = tb.min(self.sections[ts].tasks.len());
-
-        // True no-op: same section, same resulting slot.
-        if fs == ts && tb == ft {
-            self.sections[fs].tasks.insert(ft, task);
-            return;
-        }
-
+        let tb = tb.min(self.sections[ts].tasks.len());
         self.sections[ts].tasks.insert(tb, task);
         self.selected = Some((ts, tb));
         self.ensure_visible();
@@ -874,6 +853,74 @@ async fn bootstrap(
     Ok((user, workspace, projects))
 }
 
+/// Resolve a drag from `from` to a `target` into a final `(section, index)` to
+/// insert at, or `None` for an invalid or no-op move.
+///
+/// `layout` is `(visible task count, collapsed)` per section. Dropping on a row
+/// *below* the dragged task inserts after it (so dragging down lands where you
+/// expect); above inserts before; a section header drops at the section top.
+/// The returned index is already adjusted for removing the dragged task first.
+fn resolve_drop(
+    layout: &[(usize, bool)],
+    from: (usize, usize),
+    target: DropTarget,
+) -> Option<(usize, usize)> {
+    let (fs, ft) = from;
+    if fs >= layout.len() || ft >= layout[fs].0 {
+        return None;
+    }
+
+    // Virtual row index of a task, counting section headers and visible tasks.
+    let row_index = |sec: usize, task: usize| -> Option<usize> {
+        let mut row = 0;
+        for (i, (len, collapsed)) in layout.iter().enumerate() {
+            row += 1; // header
+            if *collapsed {
+                continue;
+            }
+            for ti in 0..*len {
+                if (i, ti) == (sec, task) {
+                    return Some(row);
+                }
+                row += 1;
+            }
+        }
+        None
+    };
+
+    let (ts, raw) = match target {
+        DropTarget::SectionTop(s) => (s, 0),
+        DropTarget::Task(s, h) => {
+            let dragging_down = matches!(
+                (row_index(fs, ft), row_index(s, h)),
+                (Some(src), Some(tgt)) if tgt > src
+            );
+            (s, if dragging_down { h + 1 } else { h })
+        }
+    };
+    if ts >= layout.len() {
+        return None;
+    }
+
+    // Account for removing the dragged task before inserting.
+    let mut tb = raw;
+    if fs == ts && tb > ft {
+        tb -= 1;
+    }
+    let len_after = if fs == ts {
+        layout[ts].0.saturating_sub(1)
+    } else {
+        layout[ts].0
+    };
+    tb = tb.min(len_after);
+
+    // No-op: same section, same resulting slot.
+    if fs == ts && tb == ft {
+        return None;
+    }
+    Some((ts, tb))
+}
+
 /// Pick projects matching `names` (case-insensitive), in the order `names`
 /// lists them. Names with no match are skipped.
 fn order_by_names(all: Vec<Project>, names: &[String]) -> Vec<Project> {
@@ -886,4 +933,93 @@ fn order_by_names(all: Vec<Project>, names: &[String]) -> Vec<Project> {
                 .cloned()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{order_by_names, resolve_drop, DropTarget};
+    use crate::asana::Project;
+
+    /// Two sections: 3 tasks then 2 tasks, none collapsed.
+    fn layout() -> Vec<(usize, bool)> {
+        vec![(3, false), (2, false)]
+    }
+
+    #[test]
+    fn drag_down_inserts_after_hovered_row() {
+        // The reported bug: dragging task (0,1) down onto (0,2) should land it
+        // *after* (0,2), i.e. index 2 — not be a no-op or land one too high.
+        assert_eq!(
+            resolve_drop(&layout(), (0, 1), DropTarget::Task(0, 2)),
+            Some((0, 2))
+        );
+    }
+
+    #[test]
+    fn drag_up_inserts_before_hovered_row() {
+        assert_eq!(
+            resolve_drop(&layout(), (0, 2), DropTarget::Task(0, 0)),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn dropping_on_self_is_a_noop() {
+        assert_eq!(resolve_drop(&layout(), (0, 1), DropTarget::Task(0, 1)), None);
+        // Dropping on the slot just below itself is also a no-op.
+        assert_eq!(resolve_drop(&layout(), (0, 0), DropTarget::Task(0, 0)), None);
+    }
+
+    #[test]
+    fn drag_across_sections() {
+        // (0,0) dropped onto (1,0): it's below in global order, so after it.
+        assert_eq!(
+            resolve_drop(&layout(), (0, 0), DropTarget::Task(1, 0)),
+            Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn drop_on_section_header_goes_to_top() {
+        assert_eq!(
+            resolve_drop(&layout(), (0, 0), DropTarget::SectionTop(1)),
+            Some((1, 0))
+        );
+        // ...but onto its own section's top, from the top, is a no-op.
+        assert_eq!(resolve_drop(&layout(), (0, 0), DropTarget::SectionTop(0)), None);
+    }
+
+    #[test]
+    fn out_of_range_source_is_rejected() {
+        assert_eq!(resolve_drop(&layout(), (0, 9), DropTarget::Task(1, 0)), None);
+        assert_eq!(resolve_drop(&layout(), (5, 0), DropTarget::Task(1, 0)), None);
+    }
+
+    fn project(name: &str) -> Project {
+        Project {
+            gid: format!("gid-{name}"),
+            name: name.to_string(),
+            members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn order_by_names_matches_case_insensitively_in_order() {
+        let all = vec![
+            project("ISMS"),
+            project("Sprint - Maximilian"),
+            project("Customer Support"),
+        ];
+        let names = vec![
+            "sprint - maximilian".to_string(),
+            "ISMS".to_string(),
+            "Not A Project".to_string(),
+        ];
+        let result: Vec<String> = order_by_names(all, &names)
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        // Configured order is preserved; unmatched names are dropped.
+        assert_eq!(result, vec!["Sprint - Maximilian", "ISMS"]);
+    }
 }

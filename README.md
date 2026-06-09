@@ -57,11 +57,12 @@ is handy as a quick `$EDITOR`-style "open this task" command.
 ## Requirements
 
 - **Rust** (stable). Install via [rustup](https://rustup.rs).
-- **macOS** for secure credential storage — the login token is kept in the
-  macOS Keychain. On other platforms, build still works but use the
-  `ASANA_ACCESS_TOKEN` environment variable instead of `ninjasana login`
-  (see [Log in](#log-in)).
 - An **Asana account** and a Personal Access Token.
+- For secure token storage via `ninjasana login`, an OS keychain:
+  **macOS Keychain**, **Windows Credential Manager**, or the **Linux Secret
+  Service** (e.g. GNOME Keyring / KWallet). On headless boxes or in CI, skip
+  `login` and use the `ASANA_ACCESS_TOKEN` environment variable instead
+  (see [Log in](#log-in)).
 
 ## Install
 
@@ -93,7 +94,9 @@ Ninjasana authenticates with an Asana **Personal Access Token (PAT)**.
    ```
 
    Paste the token when prompted. Ninjasana validates it against the Asana API
-   and stores it securely in your **macOS Keychain** (service `ninjasana`).
+   and stores it securely in your **OS keychain** (macOS Keychain, Windows
+   Credential Manager, or the Linux Secret Service) under the service name
+   `ninjasana`.
 
 To sign out and remove the stored token:
 
@@ -101,10 +104,10 @@ To sign out and remove the stored token:
 ninjasana logout
 ```
 
-### Environment variable (CI / non-macOS / dev)
+### Environment variable (CI / headless / dev)
 
 Instead of `login`, you can supply the token via the environment. This takes
-precedence over the Keychain and works on any platform:
+precedence over the keychain and works on any platform:
 
 ```sh
 export ASANA_ACCESS_TOKEN=your_token_here
@@ -194,7 +197,7 @@ list, so `projects` offers three options:
 
 | What | Where |
 | --- | --- |
-| Asana token | macOS Keychain (service `ninjasana`), or `ASANA_ACCESS_TOKEN` |
+| Asana token | OS keychain (service `ninjasana`), or `ASANA_ACCESS_TOKEN` |
 | Configuration | `~/.config/ninjasana/config.toml` |
 | UI state (section collapse, column widths) | `~/.config/ninjasana/state.json` |
 

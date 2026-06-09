@@ -104,7 +104,7 @@ impl Column {
 }
 
 /// Which projects to show in the navigation pane.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectSource {
     /// Favorited projects, in sidebar order (closest to the web sidebar).
     Favorites,
@@ -146,15 +146,7 @@ impl Settings {
             .map(|r| parse_columns(&r.columns))
             .filter(|c| !c.is_empty())
             .unwrap_or_else(default_columns);
-        let projects = match raw.as_ref().and_then(|r| r.projects.as_ref()) {
-            Some(RawProjects::List(names)) if !names.is_empty() => {
-                ProjectSource::Explicit(names.clone())
-            }
-            Some(RawProjects::Mode(mode)) => {
-                ProjectSource::parse(mode).unwrap_or(ProjectSource::Favorites)
-            }
-            _ => ProjectSource::Favorites,
-        };
+        let projects = project_source(raw.as_ref().and_then(|r| r.projects.as_ref()));
         Settings { columns, projects }
     }
 }
@@ -181,6 +173,19 @@ fn read_raw() -> Option<RawConfig> {
 
 fn parse_columns(tokens: &[String]) -> Vec<Column> {
     tokens.iter().filter_map(|c| Column::parse(c)).collect()
+}
+
+/// Resolve the `projects` config value into a [`ProjectSource`].
+fn project_source(raw: Option<&RawProjects>) -> ProjectSource {
+    match raw {
+        Some(RawProjects::List(names)) if !names.is_empty() => {
+            ProjectSource::Explicit(names.clone())
+        }
+        Some(RawProjects::Mode(mode)) => {
+            ProjectSource::parse(mode).unwrap_or(ProjectSource::Favorites)
+        }
+        _ => ProjectSource::Favorites,
+    }
 }
 
 fn default_columns() -> Vec<Column> {
@@ -222,4 +227,79 @@ fn write_default(path: &PathBuf) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, DEFAULT_TOML)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_columns, project_source, Column, ProjectSource, RawConfig};
+
+    #[test]
+    fn parses_builtin_and_custom_columns() {
+        assert_eq!(Column::parse("name"), Some(Column::Name));
+        assert_eq!(Column::parse("due_date"), Some(Column::DueDate));
+        assert_eq!(Column::parse("due"), Some(Column::DueDate));
+        assert_eq!(
+            Column::parse("custom:Dev Status v2"),
+            Some(Column::Custom("Dev Status v2".to_string()))
+        );
+        assert_eq!(Column::parse("not_a_column"), None);
+        assert_eq!(Column::parse("custom:"), None);
+    }
+
+    #[test]
+    fn parse_columns_skips_unknown_tokens() {
+        let tokens = ["name".to_string(), "bogus".to_string(), "tags".to_string()];
+        assert_eq!(parse_columns(&tokens), vec![Column::Name, Column::Tags]);
+    }
+
+    #[test]
+    fn project_source_accepts_mode_string() {
+        let raw: RawConfig = toml::from_str(r#"projects = "member""#).unwrap();
+        assert_eq!(
+            project_source(raw.projects.as_ref()),
+            ProjectSource::Member
+        );
+    }
+
+    #[test]
+    fn project_source_accepts_explicit_list() {
+        let raw: RawConfig = toml::from_str(r#"projects = ["ISMS", "Sprint - Maximilian"]"#).unwrap();
+        assert_eq!(
+            project_source(raw.projects.as_ref()),
+            ProjectSource::Explicit(vec!["ISMS".to_string(), "Sprint - Maximilian".to_string()])
+        );
+    }
+
+    #[test]
+    fn project_source_defaults_to_favorites() {
+        // Absent, unknown, and empty-list all fall back to favorites.
+        assert_eq!(project_source(None), ProjectSource::Favorites);
+        let bad: RawConfig = toml::from_str(r#"projects = "nonsense""#).unwrap();
+        assert_eq!(project_source(bad.projects.as_ref()), ProjectSource::Favorites);
+        let empty: RawConfig = toml::from_str(r#"projects = []"#).unwrap();
+        assert_eq!(project_source(empty.projects.as_ref()), ProjectSource::Favorites);
+    }
+
+    #[test]
+    fn full_config_round_trips() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+            columns = ["name", "custom:Dev Status v2", "tags"]
+            projects = ["ISMS"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_columns(&raw.columns),
+            vec![
+                Column::Name,
+                Column::Custom("Dev Status v2".to_string()),
+                Column::Tags
+            ]
+        );
+        assert_eq!(
+            project_source(raw.projects.as_ref()),
+            ProjectSource::Explicit(vec!["ISMS".to_string()])
+        );
+    }
 }
