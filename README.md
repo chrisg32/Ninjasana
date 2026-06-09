@@ -48,11 +48,13 @@ The full view mirrors how Asana looks in the browser, in three panes:
   Tasks show an open circle (`○`); a row click only opens its detail, so you can
   never accidentally complete a task. Tags and status-style custom fields are
   color-coded.
-- **Right — Detail.** The selected task, shown once one is selected: a
+- **Right — Detail.** The selected task, mirroring Asana's web task pane: a
   **Mark complete** button (with optional confirmation) and a **Copy link**
-  button, the title, an optional **description**, your configured **fields**,
-  and a scrollable **Comments / All activity** conversation with two tabs —
-  mirroring Asana's web task pane.
+  button, the title, an optional **description**, your configured **fields**
+  (click to edit — a picklist for enum fields, inline text entry for text
+  fields), the **subtasks** (click to open one), a scrollable
+  **Comments / All activity** conversation with two tabs, and a **composer** to
+  post a new comment.
 
 You can also open a single task straight to the detail pane from its URL, which
 is handy as a quick `$EDITOR`-style "open this task" command.
@@ -154,9 +156,13 @@ ninjasana --help          # full help
 | Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
 | Click **Copy Link** | Copy the task's URL to the clipboard |
 | Click **Comments** / **All activity** | Switch the conversation tab |
+| Click a **field** | Edit it — picklist for enum fields, text entry for text fields |
+| Click a **subtask** | Open that subtask in the detail pane |
+| Click the **composer** and type | Add a comment (Enter sends, Esc cancels) |
 | Click **Quit** / `q` / `Esc` | Exit |
 
-In the confirmation dialog: `y` / Enter confirms, `n` / Esc cancels.
+In the confirmation dialog: `y` / Enter confirms, `n` / Esc cancels. In a
+picklist: click an option, or Esc to dismiss.
 
 ## Configuration
 
@@ -216,7 +222,9 @@ The `[detail]` table controls the right-hand task pane:
 - `confirm_complete` — whether **Mark complete** asks before completing.
 - `fields` — the fields listed under the description, in order, using the same
   tokens as `columns` (built-ins and `custom:<field>`). The title is always
-  shown; the Comments / All activity tabs always follow.
+  shown; subtasks and the Comments / All activity tabs always follow. Enum and
+  text custom fields are editable in place (other field types are read-only for
+  now).
 
 ## Where your data lives
 

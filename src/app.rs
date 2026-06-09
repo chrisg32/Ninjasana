@@ -65,6 +65,14 @@ pub enum Zone {
     CopyLink,
     /// Detail pane: a conversation tab.
     Tab(ActivityTab),
+    /// Detail pane: a subtask row (index into `subtasks`).
+    Subtask(usize),
+    /// Detail pane: an editable field row (index into `detail_cfg.fields`).
+    Field(usize),
+    /// Detail pane: the comment composer.
+    Composer,
+    /// Picklist popup: `(field index, option index)`.
+    EnumOption(usize, usize),
     /// Confirm dialog buttons.
     ConfirmYes,
     ConfirmNo,
@@ -144,6 +152,21 @@ pub struct Drag {
     pub moved: bool,
 }
 
+/// What an in-progress text entry will do when submitted.
+#[derive(Clone, PartialEq, Eq)]
+pub enum InputTarget {
+    /// Post a new comment on the current task.
+    Comment,
+    /// Set the text value of a custom field (carries the field gid).
+    Field(String),
+}
+
+/// An active text-entry buffer (comment composer or field edit).
+pub struct Input {
+    pub target: InputTarget,
+    pub buffer: String,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub running: bool,
@@ -169,11 +192,19 @@ pub struct App {
     pub viewport_rows: usize,
 
     // Right pane.
+    /// The gid of the task whose detail is currently shown / loading. Used to
+    /// match async detail/stories/subtasks responses to the current selection.
+    detail_gid: Option<String>,
     pub detail: Option<Task>,
     pub detail_loading: bool,
     pub stories: Vec<Story>,
     pub stories_loading: bool,
+    pub subtasks: Vec<Task>,
     pub activity_tab: ActivityTab,
+    /// In-progress text entry (comment composer or a text field edit).
+    pub input: Option<Input>,
+    /// Index (into `detail_cfg.fields`) of the field whose picklist is open.
+    pub picklist: Option<usize>,
     /// Scroll offset of the description+fields region.
     pub detail_scroll: usize,
     /// Scroll offset of the conversation region.
@@ -226,11 +257,15 @@ impl App {
             scroll: 0,
             selected: None,
             viewport_rows: 0,
+            detail_gid: None,
             detail: None,
             detail_loading: false,
             stories: Vec::new(),
             stories_loading: false,
+            subtasks: Vec::new(),
             activity_tab: ActivityTab::Comments,
+            input: None,
+            picklist: None,
             detail_scroll: 0,
             thread_scroll: 0,
             detail_upper_rect: None,
@@ -261,7 +296,9 @@ impl App {
                 let gid = gid.clone();
                 self.status = format!("Loading task {gid}…");
                 if self.client.is_some() {
+                    self.detail_gid = Some(gid.clone());
                     self.detail_loading = true;
+                    self.stories_loading = true;
                     self.load_detail(gid);
                 } else {
                     self.status =
@@ -313,12 +350,38 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // Text entry (comment composer / field edit) captures input first.
+        if self.input.is_some() {
+            match key.code {
+                KeyCode::Esc => self.input = None,
+                KeyCode::Enter => self.submit_input(),
+                KeyCode::Backspace => {
+                    if let Some(input) = self.input.as_mut() {
+                        input.buffer.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(input) = self.input.as_mut() {
+                        input.buffer.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         // The confirmation dialog captures input while open.
         if self.confirm_complete_open {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => self.do_complete(),
                 KeyCode::Char('n') | KeyCode::Esc => self.confirm_complete_open = false,
                 _ => {}
+            }
+            return;
+        }
+        // The picklist closes on Esc; selection is by click.
+        if self.picklist.is_some() {
+            if key.code == KeyCode::Esc {
+                self.picklist = None;
             }
             return;
         }
@@ -345,6 +408,15 @@ impl App {
                         Zone::ConfirmYes => self.do_complete(),
                         Zone::ConfirmNo => self.confirm_complete_open = false,
                         _ => {}
+                    }
+                    return;
+                }
+                // While a picklist is open, an option selects; anything else closes it.
+                if self.picklist.is_some() {
+                    if let Zone::EnumOption(field_index, option_index) = zone {
+                        self.select_enum_option(field_index, option_index);
+                    } else {
+                        self.picklist = None;
                     }
                     return;
                 }
@@ -437,11 +509,26 @@ impl App {
                 self.activity_tab = tab;
                 self.thread_scroll = 0;
             }
+            Zone::Subtask(i) => {
+                if let Some(task) = self.subtasks.get(i).cloned() {
+                    self.open_task(&task);
+                }
+            }
+            Zone::Field(i) => self.edit_field(i),
+            Zone::Composer => {
+                if self.input.is_none() {
+                    self.input = Some(Input {
+                        target: InputTarget::Comment,
+                        buffer: String::new(),
+                    });
+                }
+                self.status = "Type a comment — Enter to send, Esc to cancel.".into();
+            }
             Zone::ConfirmYes => self.do_complete(),
             Zone::ConfirmNo => self.confirm_complete_open = false,
             Zone::Quit => self.running = false,
-            // Resize handles are handled on press, never routed here.
-            Zone::ResizeHandle(_) => {}
+            // Handled on press / in their own modes, never routed here.
+            Zone::ResizeHandle(_) | Zone::EnumOption(..) => {}
         }
     }
 
@@ -491,6 +578,151 @@ impl App {
         }
     }
 
+    /// The custom field backing detail field `index`, if it's a custom field
+    /// present on the current task.
+    fn field_custom(&self, index: usize) -> Option<&crate::asana::CustomField> {
+        let Column::Custom(name) = self.detail_cfg.fields.get(index)? else {
+            return None;
+        };
+        self.detail
+            .as_ref()?
+            .custom_fields
+            .iter()
+            .find(|f| &f.name == name)
+    }
+
+    /// Begin editing a field: enum fields open a picklist, text fields open a
+    /// text editor. Other field types are read-only for now.
+    fn edit_field(&mut self, index: usize) {
+        enum Edit {
+            Picklist,
+            Text(String, String),
+        }
+        let edit = {
+            let Some(cf) = self.field_custom(index) else {
+                return;
+            };
+            if cf.is_enum() && !cf.enum_options.is_empty() {
+                Edit::Picklist
+            } else if cf.is_text() {
+                Edit::Text(cf.gid.clone(), cf.display_value.clone().unwrap_or_default())
+            } else {
+                return;
+            }
+        };
+        match edit {
+            Edit::Picklist => self.picklist = Some(index),
+            Edit::Text(field_gid, current) => {
+                self.input = Some(Input {
+                    target: InputTarget::Field(field_gid),
+                    buffer: current,
+                });
+            }
+        }
+    }
+
+    fn select_enum_option(&mut self, field_index: usize, option_index: usize) {
+        self.picklist = None;
+        let resolved = {
+            let Some(cf) = self.field_custom(field_index) else {
+                return;
+            };
+            cf.enum_options
+                .get(option_index)
+                .map(|opt| (cf.gid.clone(), opt.gid.clone(), opt.name.clone()))
+        };
+        let (Some((field_gid, option_gid, option_name)), Some(task_gid)) =
+            (resolved, self.detail_gid.clone())
+        else {
+            return;
+        };
+
+        self.update_local_custom_field(&field_gid, &option_name);
+        self.status = format!("Set field to {option_name}.");
+        if let Some(client) = self.client.clone() {
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                if let Err(err) = client
+                    .set_custom_field(&task_gid, &field_gid, serde_json::json!(option_gid))
+                    .await
+                {
+                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
+                        "update failed: {err:#}"
+                    )))));
+                }
+            });
+        }
+    }
+
+    fn submit_input(&mut self) {
+        let Some(input) = self.input.take() else {
+            return;
+        };
+        let text = input.buffer.trim().to_string();
+        let Some(task_gid) = self.detail_gid.clone() else {
+            return;
+        };
+        match input.target {
+            InputTarget::Comment => {
+                if text.is_empty() {
+                    return;
+                }
+                if let Some(client) = self.client.clone() {
+                    let tx = self.tx.clone();
+                    self.status = "Posting comment…".into();
+                    tokio::spawn(async move {
+                        let update = match client.add_comment(&task_gid, &text).await {
+                            // Re-fetch the thread so the new comment appears.
+                            Ok(()) => match client.stories(&task_gid).await {
+                                Ok(stories) => AsanaUpdate::Stories {
+                                    gid: task_gid,
+                                    stories,
+                                },
+                                Err(err) => AsanaUpdate::Error(format!("{err:#}")),
+                            },
+                            Err(err) => AsanaUpdate::Error(format!("comment failed: {err:#}")),
+                        };
+                        let _ = tx.send(Event::Asana(Box::new(update)));
+                    });
+                } else {
+                    self.stories.push(Story {
+                        kind: "comment".to_string(),
+                        text,
+                        created_at: String::new(),
+                        created_by: Some(Named {
+                            name: "You (demo)".to_string(),
+                        }),
+                    });
+                }
+            }
+            InputTarget::Field(field_gid) => {
+                self.update_local_custom_field(&field_gid, &text);
+                self.status = "Updating field…".into();
+                if let Some(client) = self.client.clone() {
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = client
+                            .set_custom_field(&task_gid, &field_gid, serde_json::json!(text))
+                            .await
+                        {
+                            let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
+                                "update failed: {err:#}"
+                            )))));
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    fn update_local_custom_field(&mut self, field_gid: &str, display: &str) {
+        if let Some(task) = self.detail.as_mut()
+            && let Some(field) = task.custom_fields.iter_mut().find(|f| f.gid == field_gid)
+        {
+            field.display_value = Some(display.to_string());
+        }
+    }
+
     fn handle_asana(&mut self, update: AsanaUpdate) {
         match update {
             AsanaUpdate::Bootstrap {
@@ -514,16 +746,24 @@ impl App {
                 }
             }
             AsanaUpdate::Detail(detail) => {
-                self.detail_loading = false;
-                self.detail_scroll = 0;
-                self.detail = Some(detail);
+                // Match against the in-flight gid (detail may arrive after we
+                // started loading a different task).
+                if self.detail_gid.as_deref() == Some(detail.gid.as_str()) {
+                    self.detail_loading = false;
+                    self.detail_scroll = 0;
+                    self.detail = Some(detail);
+                }
             }
             AsanaUpdate::Stories { gid, stories } => {
-                // Ignore stories for a task we've navigated away from.
-                if self.detail.as_ref().is_some_and(|t| t.gid == gid) {
+                if self.detail_gid.as_deref() == Some(gid.as_str()) {
                     self.stories_loading = false;
                     self.stories = stories;
                     self.thread_scroll = 0;
+                }
+            }
+            AsanaUpdate::Subtasks { gid, subtasks } => {
+                if self.detail_gid.as_deref() == Some(gid.as_str()) {
+                    self.subtasks = subtasks;
                 }
             }
             AsanaUpdate::Error(message) => {
@@ -564,16 +804,26 @@ impl App {
         self.selected = Some((section, task));
         self.status = format!("Selected: {}", task_obj.name);
         self.ensure_visible();
+        self.open_task(&task_obj);
+    }
+
+    /// Show a task in the detail pane and (re)load its detail, stories, and
+    /// subtasks. Used by selecting a row and by clicking a subtask.
+    fn open_task(&mut self, task: &Task) {
+        self.detail_gid = Some(task.gid.clone());
         self.stories.clear();
+        self.subtasks.clear();
+        self.input = None;
+        self.picklist = None;
         self.detail_scroll = 0;
         self.thread_scroll = 0;
         if self.client.is_some() {
             self.detail = None;
             self.detail_loading = true;
             self.stories_loading = true;
-            self.load_detail(task_obj.gid);
+            self.load_detail(task.gid.clone());
         } else {
-            self.detail = Some(demo_detail(&task_obj));
+            self.detail = Some(demo_detail(task));
             self.stories = demo_stories();
         }
     }
@@ -715,12 +965,12 @@ impl App {
         let Some(client) = self.client.clone() else {
             return;
         };
-        // Fetch the task detail and its stories concurrently.
+        // Detail, stories, and subtasks load concurrently.
         let tx = self.tx.clone();
-        let detail_client = client.clone();
-        let detail_gid = gid.clone();
+        let c = client.clone();
+        let g = gid.clone();
         tokio::spawn(async move {
-            let update = match detail_client.task(&detail_gid).await {
+            let update = match c.task(&g).await {
                 Ok(detail) => AsanaUpdate::Detail(detail),
                 Err(err) => AsanaUpdate::Error(format!("{err:#}")),
             };
@@ -728,9 +978,20 @@ impl App {
         });
 
         let tx = self.tx.clone();
+        let c = client.clone();
+        let g = gid.clone();
         tokio::spawn(async move {
-            if let Ok(stories) = client.stories(&gid).await {
-                let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Stories { gid, stories })));
+            let update = match c.stories(&g).await {
+                Ok(stories) => AsanaUpdate::Stories { gid: g, stories },
+                Err(err) => AsanaUpdate::Error(format!("loading comments: {err:#}")),
+            };
+            let _ = tx.send(Event::Asana(Box::new(update)));
+        });
+
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(subtasks) = client.subtasks(&gid).await {
+                let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Subtasks { gid, subtasks })));
             }
         });
     }
@@ -914,12 +1175,22 @@ fn demo_task(gid: &str, name: &str, completed: bool, due: Option<&str>) -> Task 
             name: "demo".to_string(),
         }],
         custom_fields: vec![CustomField {
+            gid: "demo-field-devstatus".to_string(),
             name: "Dev Status v2".to_string(),
             display_value: Some(if completed {
                 "Done".to_string()
             } else {
                 "2. Development".to_string()
             }),
+            resource_subtype: "enum".to_string(),
+            enum_options: ["1. Backlog", "2. Development", "3. Review", "Done"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| crate::asana::EnumOption {
+                    gid: format!("demo-opt-{i}"),
+                    name: name.to_string(),
+                })
+                .collect(),
         }],
         notes: format!(
             "Demo description for \"{name}\".\n\nConnect a real account with \

@@ -40,7 +40,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     render_status(frame, app, status);
 
-    // Modal overlay last, so its zones sit on top.
+    // Modal overlays last, so their zones sit on top.
+    if app.picklist.is_some() {
+        render_picklist_popup(frame, app);
+    }
     if app.confirm_complete_open {
         render_confirm_dialog(frame, app);
     }
@@ -369,10 +372,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         title_area,
     );
 
-    let [upper, tabbar, thread] = Layout::vertical([
-        Constraint::Percentage(40),
+    // upper (description + fields + subtasks) · tabs · thread · composer
+    let [upper, tabbar, thread, composer] = Layout::vertical([
+        Constraint::Percentage(45),
         Constraint::Length(1),
-        Constraint::Min(0),
+        Constraint::Min(3),
+        Constraint::Length(3),
     ])
     .areas(body);
     app.detail_upper_rect = Some(upper);
@@ -381,6 +386,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     render_detail_upper(frame, app, &task, upper);
     render_activity_tabs(frame, app, tabbar);
     render_thread(frame, app, thread);
+    render_composer(frame, app, composer);
 }
 
 fn render_detail_buttons(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
@@ -425,38 +431,142 @@ fn render_detail_buttons(frame: &mut Frame, app: &mut App, task: &Task, area: Re
     }
 }
 
-fn render_detail_upper(frame: &mut Frame, app: &App, task: &Task, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
+/// A virtual row in the upper detail region. Some rows are interactive.
+struct UpperRow<'a> {
+    spans: Vec<Span<'a>>,
+    zone: Option<Zone>,
+}
+
+fn render_detail_upper(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let mut rows: Vec<UpperRow> = Vec::new();
+
+    let dim = Style::new().fg(Color::DarkGray);
+    let header = |s: &str| UpperRow {
+        spans: vec![Span::styled(
+            s.to_string(),
+            Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        )],
+        zone: None,
+    };
 
     if app.detail_cfg.show_description && !task.notes.trim().is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Description",
-            Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-        )));
+        rows.push(header("Description"));
         for line in task.notes.lines() {
-            lines.push(Line::from(line.to_string()));
+            for chunk in wrap_hard(line, width) {
+                rows.push(UpperRow {
+                    spans: vec![Span::raw(chunk)],
+                    zone: None,
+                });
+            }
         }
-        lines.push(Line::from(""));
+        rows.push(UpperRow { spans: vec![], zone: None });
     }
 
-    for column in &app.detail_cfg.fields {
+    // Fields (clickable to edit).
+    for (i, column) in app.detail_cfg.fields.iter().enumerate() {
         let value = column.value(task);
-        let shown = if value.is_empty() { "—".to_string() } else { value.clone() };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}: ", column.title()),
-                Style::new().fg(Color::DarkGray),
-            ),
-            Span::styled(shown, field_value_style(column, &value)),
-        ]));
+        let shown = if value.is_empty() {
+            "—".to_string()
+        } else {
+            value.clone()
+        };
+        rows.push(UpperRow {
+            spans: vec![
+                Span::styled(format!("{}: ", column.title()), dim),
+                Span::styled(shown, field_value_style(column, &value)),
+            ],
+            zone: Some(Zone::Field(i)),
+        });
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll as u16, 0)),
-        area,
+    // Subtasks (clickable to open).
+    if !app.subtasks.is_empty() {
+        rows.push(UpperRow { spans: vec![], zone: None });
+        rows.push(header("Subtasks"));
+        for (i, sub) in app.subtasks.iter().enumerate() {
+            let mark = if sub.completed { "✔" } else { "○" };
+            rows.push(UpperRow {
+                spans: vec![Span::raw(fit(&format!("{mark} {}", sub.name), width))],
+                zone: Some(Zone::Subtask(i)),
+            });
+        }
+    }
+
+    let height = area.height as usize;
+    let start = app.detail_scroll.min(rows.len().saturating_sub(1));
+    for (offset, row) in rows.iter().enumerate().skip(start).take(height).enumerate() {
+        let (_, row) = row;
+        let rect = Rect {
+            x: area.x,
+            y: area.y + offset as u16,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(Line::from(row.spans.clone())), rect);
+        if let Some(zone) = &row.zone {
+            app.zones.push(zone.clone(), rect);
+        }
+    }
+}
+
+fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
+    let editing_comment = matches!(
+        app.input.as_ref().map(|i| &i.target),
+        Some(crate::app::InputTarget::Comment)
     );
+    let (title, body): (&str, String) = match &app.input {
+        Some(input) => {
+            let label = match input.target {
+                crate::app::InputTarget::Comment => " New comment ",
+                crate::app::InputTarget::Field(_) => " Edit field ",
+            };
+            (label, format!("{}▏", input.buffer))
+        }
+        None => (" Comment ", "Click to add a comment…".to_string()),
+    };
+    let border = if app.input.is_some() {
+        Style::new().fg(ACCENT)
+    } else {
+        Style::new().fg(Color::DarkGray)
+    };
+    let block = Block::bordered()
+        .title(title)
+        .border_type(BorderType::Rounded)
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text_style = if app.input.is_some() {
+        Style::new()
+    } else {
+        Style::new().fg(Color::DarkGray)
+    };
+    frame.render_widget(
+        Paragraph::new(body).style(text_style).wrap(Wrap { trim: false }),
+        inner,
+    );
+    // Only the comment composer is click-to-focus; field edits open from a row.
+    if app.input.is_none() || editing_comment {
+        app.zones.push(Zone::Composer, area);
+    }
+}
+
+/// Hard-wrap `text` to `width` columns (by character — fine for mostly ASCII).
+fn wrap_hard(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(width)
+        .map(|c| c.iter().collect::<String>())
+        .collect()
 }
 
 fn render_activity_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -601,6 +711,72 @@ fn render_confirm_dialog(frame: &mut Frame, app: &mut App) {
     );
     app.zones.push(Zone::ConfirmYes, yes_rect);
     app.zones.push(Zone::ConfirmNo, no_rect);
+}
+
+fn render_picklist_popup(frame: &mut Frame, app: &mut App) {
+    // Resolve the field's options up front, then drop the borrow before drawing.
+    let Some(field_index) = app.picklist else {
+        return;
+    };
+    let resolved = {
+        let Some(Column::Custom(name)) = app.detail_cfg.fields.get(field_index) else {
+            return;
+        };
+        let Some(task) = app.detail.as_ref() else {
+            return;
+        };
+        task.custom_fields.iter().find(|f| &f.name == name).map(|cf| {
+            (
+                name.clone(),
+                cf.enum_options.iter().map(|o| o.name.clone()).collect::<Vec<_>>(),
+                cf.display_value.clone().unwrap_or_default(),
+            )
+        })
+    };
+    let Some((title, options, current)) = resolved else {
+        return;
+    };
+
+    let screen = frame.area();
+    let w = 36u16.min(screen.width.saturating_sub(2));
+    let h = (options.len() as u16 + 2).clamp(3, screen.height.saturating_sub(2));
+    let rect = Rect {
+        x: screen.x + (screen.width.saturating_sub(w)) / 2,
+        y: screen.y + (screen.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(format!(" {title} "))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    for (i, name) in options.iter().enumerate().take(inner.height as usize) {
+        let row = Rect {
+            x: inner.x,
+            y: inner.y + i as u16,
+            width: inner.width,
+            height: 1,
+        };
+        let selected = *name == current;
+        let style = if selected {
+            Style::new()
+                .fg(Color::Black)
+                .bg(ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        let marker = if selected { "● " } else { "  " };
+        frame.render_widget(
+            Paragraph::new(fit(&format!("{marker}{name}"), inner.width as usize)).style(style),
+            row,
+        );
+        app.zones.push(Zone::EnumOption(field_index, i), row);
+    }
 }
 
 /// Color a detail field value like the table: tags magenta, status-style custom

@@ -40,6 +40,8 @@ pub enum AsanaUpdate {
     Detail(Task),
     /// Comments / activity stories for a task.
     Stories { gid: String, stories: Vec<Story> },
+    /// Subtasks of a task.
+    Subtasks { gid: String, subtasks: Vec<Task> },
     /// Something went wrong; carries a human-readable message.
     Error(String),
 }
@@ -111,14 +113,40 @@ pub struct Membership {
     pub project: Option<Named>,
 }
 
+/// One selectable option of an enum custom field.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnumOption {
+    pub gid: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 /// A custom field on a task. `display_value` is Asana's rendered value for any
 /// field type (enum, text, number, …), so we can show it without type logic.
+/// The `gid`, `resource_subtype`, and `enum_options` are populated for the
+/// detail view so the field can be edited.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomField {
+    #[serde(default)]
+    pub gid: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub display_value: Option<String>,
+    #[serde(default)]
+    pub resource_subtype: String,
+    #[serde(default)]
+    pub enum_options: Vec<EnumOption>,
+}
+
+impl CustomField {
+    pub fn is_enum(&self) -> bool {
+        self.resource_subtype == "enum"
+    }
+
+    pub fn is_text(&self) -> bool {
+        self.resource_subtype == "text"
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -434,7 +462,9 @@ impl Client {
                 "opt_fields",
                 "name,completed,notes,permalink_url,due_on,assignee.name,\
                  memberships.project.name,tags.name,\
-                 custom_fields.name,custom_fields.display_value",
+                 custom_fields.gid,custom_fields.name,custom_fields.display_value,\
+                 custom_fields.resource_subtype,custom_fields.enum_options.gid,\
+                 custom_fields.enum_options.name",
             )],
         )
         .await
@@ -452,12 +482,41 @@ impl Client {
         .await
     }
 
+    /// Subtasks of a task, in order.
+    pub async fn subtasks(&self, gid: &str) -> Result<Vec<Task>> {
+        self.get_all(
+            &format!("tasks/{gid}/subtasks"),
+            &[("limit", "100"), ("opt_fields", "name,completed")],
+        )
+        .await
+    }
+
     /// Mark a task complete (or incomplete).
     pub async fn set_completed(&self, gid: &str, completed: bool) -> Result<()> {
         self.write(
             reqwest::Method::PUT,
             &format!("tasks/{gid}"),
             json!({ "data": { "completed": completed } }),
+        )
+        .await
+    }
+
+    /// Post a comment on a task.
+    pub async fn add_comment(&self, gid: &str, text: &str) -> Result<()> {
+        self.write(
+            reqwest::Method::POST,
+            &format!("tasks/{gid}/stories"),
+            json!({ "data": { "text": text } }),
+        )
+        .await
+    }
+
+    /// Set a custom field value (an enum option gid, or text/number value).
+    pub async fn set_custom_field(&self, gid: &str, field_gid: &str, value: Value) -> Result<()> {
+        self.write(
+            reqwest::Method::PUT,
+            &format!("tasks/{gid}"),
+            json!({ "data": { "custom_fields": { field_gid: value } } }),
         )
         .await
     }
