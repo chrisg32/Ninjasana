@@ -37,7 +37,9 @@ pub enum AsanaUpdate {
         sections: Vec<Section>,
     },
     /// Full detail for a single task.
-    Detail(TaskDetail),
+    Detail(Task),
+    /// Comments / activity stories for a task.
+    Stories { gid: String, stories: Vec<Story> },
     /// Something went wrong; carries a human-readable message.
     Error(String),
 }
@@ -138,6 +140,11 @@ pub struct Task {
     pub tags: Vec<Named>,
     #[serde(default)]
     pub custom_fields: Vec<CustomField>,
+    // Populated for the detail view (see `task`).
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub permalink_url: Option<String>,
 }
 
 impl Task {
@@ -179,18 +186,24 @@ pub struct Section {
     pub tasks: Vec<Task>,
 }
 
+/// A story is a comment or activity event on a task.
 #[derive(Debug, Clone, Deserialize)]
-pub struct TaskDetail {
-    #[allow(dead_code)]
-    pub gid: String,
-    pub name: String,
+pub struct Story {
+    /// `"comment"` or `"system"`.
+    #[serde(rename = "type", default)]
+    pub kind: String,
     #[serde(default)]
-    pub completed: bool,
+    pub text: String,
     #[serde(default)]
-    pub notes: String,
-    pub assignee: Option<Named>,
-    pub due_on: Option<String>,
-    pub permalink_url: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub created_by: Option<Named>,
+}
+
+impl Story {
+    pub fn is_comment(&self) -> bool {
+        self.kind == "comment"
+    }
 }
 
 /// `{ "gid": ... }` for the user's task list.
@@ -413,13 +426,38 @@ impl Client {
         Ok(group_by_assignee_section(tasks))
     }
 
-    pub async fn task(&self, gid: &str) -> Result<TaskDetail> {
+    /// Full task detail for the right-hand pane.
+    pub async fn task(&self, gid: &str) -> Result<Task> {
         self.get(
             &format!("tasks/{gid}"),
             &[(
                 "opt_fields",
-                "name,completed,notes,due_on,assignee.name,permalink_url",
+                "name,completed,notes,permalink_url,due_on,assignee.name,\
+                 memberships.project.name,tags.name,\
+                 custom_fields.name,custom_fields.display_value",
             )],
+        )
+        .await
+    }
+
+    /// Comments and activity stories for a task, oldest first.
+    pub async fn stories(&self, gid: &str) -> Result<Vec<Story>> {
+        self.get_all(
+            &format!("tasks/{gid}/stories"),
+            &[
+                ("limit", "100"),
+                ("opt_fields", "type,text,created_at,created_by.name"),
+            ],
+        )
+        .await
+    }
+
+    /// Mark a task complete (or incomplete).
+    pub async fn set_completed(&self, gid: &str, completed: bool) -> Result<()> {
+        self.write(
+            reqwest::Method::PUT,
+            &format!("tasks/{gid}"),
+            json!({ "data": { "completed": completed } }),
         )
         .await
     }

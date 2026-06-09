@@ -133,9 +133,20 @@ enum RawProjects {
     List(Vec<String>),
 }
 
+/// How the task detail pane is composed.
+pub struct DetailConfig {
+    /// Whether to show the task description (notes).
+    pub show_description: bool,
+    /// Whether the Mark-complete button asks for confirmation first.
+    pub confirm_complete: bool,
+    /// The fields listed under the description, in order.
+    pub fields: Vec<Column>,
+}
+
 pub struct Settings {
     pub columns: Vec<Column>,
     pub projects: ProjectSource,
+    pub detail: DetailConfig,
 }
 
 impl Settings {
@@ -147,7 +158,16 @@ impl Settings {
             .filter(|c| !c.is_empty())
             .unwrap_or_else(default_columns);
         let projects = project_source(raw.as_ref().and_then(|r| r.projects.as_ref()));
-        Settings { columns, projects }
+        let detail = raw
+            .as_ref()
+            .and_then(|r| r.detail.as_ref())
+            .map(detail_config)
+            .unwrap_or_else(default_detail);
+        Settings {
+            columns,
+            projects,
+            detail,
+        }
     }
 }
 
@@ -157,6 +177,32 @@ struct RawConfig {
     columns: Vec<String>,
     #[serde(default)]
     projects: Option<RawProjects>,
+    #[serde(default)]
+    detail: Option<RawDetail>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawDetail {
+    show_description: Option<bool>,
+    confirm_complete: Option<bool>,
+    #[serde(default)]
+    fields: Vec<String>,
+}
+
+fn detail_config(raw: &RawDetail) -> DetailConfig {
+    DetailConfig {
+        show_description: raw.show_description.unwrap_or(true),
+        confirm_complete: raw.confirm_complete.unwrap_or(true),
+        fields: parse_columns(&raw.fields),
+    }
+}
+
+fn default_detail() -> DetailConfig {
+    DetailConfig {
+        show_description: true,
+        confirm_complete: true,
+        fields: vec![Column::Assignee, Column::DueDate, Column::Projects],
+    }
 }
 
 /// Read and parse the config file; seed a default on first run.
@@ -213,6 +259,17 @@ columns = [\"name\", \"due_date\", \"assignee\", \"projects\", \"tags\"]
 # ...or an explicit, ordered list of project names to show exactly those:
 #   projects = [\"ISMS\", \"Sprint - Maximilian\", \"Software Department\"]
 projects = \"favorites\"
+
+# The task detail pane (right side).
+[detail]
+# Show the task description (notes)?
+show_description = true
+# Ask for confirmation before marking a task complete?
+confirm_complete = true
+# Fields listed under the description, in order. Same tokens as `columns`
+# (built-ins and \"custom:<field>\"), e.g.:
+#   fields = [\"assignee\", \"due_date\", \"custom:Dev Status v2\"]
+fields = [\"assignee\", \"due_date\", \"projects\"]
 ";
 
 fn config_path() -> Option<PathBuf> {
@@ -278,6 +335,34 @@ mod tests {
         assert_eq!(project_source(bad.projects.as_ref()), ProjectSource::Favorites);
         let empty: RawConfig = toml::from_str(r#"projects = []"#).unwrap();
         assert_eq!(project_source(empty.projects.as_ref()), ProjectSource::Favorites);
+    }
+
+    #[test]
+    fn detail_section_parses_fields_and_flags() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+            [detail]
+            show_description = false
+            confirm_complete = false
+            fields = ["assignee", "custom:Dev Status v2"]
+            "#,
+        )
+        .unwrap();
+        let detail = super::detail_config(raw.detail.as_ref().unwrap());
+        assert!(!detail.show_description);
+        assert!(!detail.confirm_complete);
+        assert_eq!(
+            detail.fields,
+            vec![Column::Assignee, Column::Custom("Dev Status v2".to_string())]
+        );
+    }
+
+    #[test]
+    fn detail_defaults_when_section_absent() {
+        let detail = super::default_detail();
+        assert!(detail.show_description);
+        assert!(detail.confirm_complete);
+        assert!(!detail.fields.is_empty());
     }
 
     #[test]

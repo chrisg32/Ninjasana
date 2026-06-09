@@ -18,8 +18,9 @@ pub enum Event {
     Tick,
     /// A raw terminal input event (key or mouse).
     Crossterm(CrosstermEvent),
-    /// A result coming back from the Asana client.
-    Asana(AsanaUpdate),
+    /// A result coming back from the Asana client. Boxed because it's much
+    /// larger than the other variants and far less frequent.
+    Asana(Box<AsanaUpdate>),
 }
 
 pub struct EventBus {

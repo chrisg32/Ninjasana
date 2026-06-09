@@ -16,9 +16,9 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Task, TaskDetail, TaskListKey};
+use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Story, Task, TaskListKey};
 use crate::event::{Event, EventBus};
-use crate::settings::{Column, ProjectSource};
+use crate::settings::{Column, DetailConfig, ProjectSource};
 use crate::state::UiState;
 
 /// Minimum width a resizable column can be dragged to.
@@ -41,6 +41,13 @@ pub enum Nav {
     Project(usize),
 }
 
+/// The two tabs in the detail pane's conversation area.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ActivityTab {
+    Comments,
+    AllActivity,
+}
+
 /// A clickable region of the screen. Variants carry whatever the click handler
 /// needs to act on.
 #[derive(Clone, PartialEq)]
@@ -52,6 +59,15 @@ pub enum Zone {
     TaskRow(usize, usize),
     /// A column divider — drag to resize the column at this index.
     ResizeHandle(usize),
+    /// Detail pane: the Mark-complete button.
+    MarkComplete,
+    /// Detail pane: the Copy-link button.
+    CopyLink,
+    /// Detail pane: a conversation tab.
+    Tab(ActivityTab),
+    /// Confirm dialog buttons.
+    ConfirmYes,
+    ConfirmNo,
     Quit,
 }
 
@@ -153,8 +169,22 @@ pub struct App {
     pub viewport_rows: usize,
 
     // Right pane.
-    pub detail: Option<TaskDetail>,
+    pub detail: Option<Task>,
     pub detail_loading: bool,
+    pub stories: Vec<Story>,
+    pub stories_loading: bool,
+    pub activity_tab: ActivityTab,
+    /// Scroll offset of the description+fields region.
+    pub detail_scroll: usize,
+    /// Scroll offset of the conversation region.
+    pub thread_scroll: usize,
+    /// Screen rects of the two scrollable detail regions (set each render).
+    pub detail_upper_rect: Option<Rect>,
+    pub detail_thread_rect: Option<Rect>,
+    /// Whether the mark-complete confirmation dialog is open.
+    pub confirm_complete_open: bool,
+    /// Detail pane configuration.
+    pub detail_cfg: DetailConfig,
 
     /// Columns shown in the task table, from the user's config.
     pub columns: Vec<Column>,
@@ -177,6 +207,7 @@ impl App {
         client: Option<Client>,
         columns: Vec<Column>,
         project_source: ProjectSource,
+        detail_cfg: DetailConfig,
     ) -> Self {
         // A dummy sender; replaced with the real one in `run`.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -197,6 +228,15 @@ impl App {
             viewport_rows: 0,
             detail: None,
             detail_loading: false,
+            stories: Vec::new(),
+            stories_loading: false,
+            activity_tab: ActivityTab::Comments,
+            detail_scroll: 0,
+            thread_scroll: 0,
+            detail_upper_rect: None,
+            detail_thread_rect: None,
+            confirm_complete_open: false,
+            detail_cfg,
             columns,
             project_source,
             drag: None,
@@ -236,7 +276,7 @@ impl App {
             match bus.next().await {
                 Some(Event::Tick) => {}
                 Some(Event::Crossterm(event)) => self.handle_crossterm(event),
-                Some(Event::Asana(update)) => self.handle_asana(update),
+                Some(Event::Asana(update)) => self.handle_asana(*update),
                 None => break,
             }
         }
@@ -257,7 +297,7 @@ impl App {
                     },
                     Err(err) => AsanaUpdate::Error(format!("{err:#}")),
                 };
-                let _ = tx.send(Event::Asana(update));
+                let _ = tx.send(Event::Asana(Box::new(update)));
             });
         }
     }
@@ -273,6 +313,15 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // The confirmation dialog captures input while open.
+        if self.confirm_complete_open {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => self.do_complete(),
+                KeyCode::Char('n') | KeyCode::Esc => self.confirm_complete_open = false,
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -287,28 +336,38 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(zone) = self.zones.hit(mouse.column, mouse.row) {
+                let Some(zone) = self.zones.hit(mouse.column, mouse.row) else {
+                    return;
+                };
+                // While the confirm dialog is open, only its buttons respond.
+                if self.confirm_complete_open {
                     match zone {
-                        // A column divider arms a resize.
-                        Zone::ResizeHandle(col) => {
-                            self.resize = Some(Resize {
-                                col,
-                                start_x: mouse.column,
-                                start_width: self.effective_width(col),
-                            });
-                        }
-                        // Pressing a task row selects it and arms a potential
-                        // drag; whether it becomes a drag depends on motion.
-                        Zone::TaskRow(si, ti) => {
-                            self.drag = Some(Drag {
-                                from: (si, ti),
-                                over: None,
-                                moved: false,
-                            });
-                            self.activate(zone);
-                        }
-                        other => self.activate(other),
+                        Zone::ConfirmYes => self.do_complete(),
+                        Zone::ConfirmNo => self.confirm_complete_open = false,
+                        _ => {}
                     }
+                    return;
+                }
+                match zone {
+                    // A column divider arms a resize.
+                    Zone::ResizeHandle(col) => {
+                        self.resize = Some(Resize {
+                            col,
+                            start_x: mouse.column,
+                            start_width: self.effective_width(col),
+                        });
+                    }
+                    // Pressing a task row selects it and arms a potential
+                    // drag; whether it becomes a drag depends on motion.
+                    Zone::TaskRow(si, ti) => {
+                        self.drag = Some(Drag {
+                            from: (si, ti),
+                            over: None,
+                            moved: false,
+                        });
+                        self.activate(zone);
+                    }
+                    other => self.activate(other),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -339,10 +398,24 @@ impl App {
                     self.apply_reorder(drag.from, target);
                 }
             }
-            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_add(1),
-            MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_sub(1),
+            MouseEventKind::ScrollDown => self.scroll_at(mouse.column, mouse.row, 1),
+            MouseEventKind::ScrollUp => self.scroll_at(mouse.column, mouse.row, -1),
             _ => {}
         }
+    }
+
+    /// Scroll whichever region the cursor is over: the conversation thread, the
+    /// description/fields region, or (default) the task list.
+    fn scroll_at(&mut self, column: u16, row: u16, delta: isize) {
+        let pos = Position { x: column, y: row };
+        let target = if self.detail_thread_rect.is_some_and(|r| r.contains(pos)) {
+            &mut self.thread_scroll
+        } else if self.detail_upper_rect.is_some_and(|r| r.contains(pos)) {
+            &mut self.detail_scroll
+        } else {
+            &mut self.scroll
+        };
+        *target = target.saturating_add_signed(delta);
     }
 
     fn activate(&mut self, zone: Zone) {
@@ -358,9 +431,63 @@ impl App {
                 }
             }
             Zone::TaskRow(section, task) => self.select_task(section, task),
+            Zone::MarkComplete => self.mark_complete(),
+            Zone::CopyLink => self.copy_link(),
+            Zone::Tab(tab) => {
+                self.activity_tab = tab;
+                self.thread_scroll = 0;
+            }
+            Zone::ConfirmYes => self.do_complete(),
+            Zone::ConfirmNo => self.confirm_complete_open = false,
             Zone::Quit => self.running = false,
             // Resize handles are handled on press, never routed here.
             Zone::ResizeHandle(_) => {}
+        }
+    }
+
+    // ---- detail actions ------------------------------------------------
+
+    fn mark_complete(&mut self) {
+        // Nothing to do if there's no task or it's already complete.
+        if self.detail.as_ref().is_none_or(|t| t.completed) {
+            return;
+        }
+        if self.detail_cfg.confirm_complete {
+            self.confirm_complete_open = true;
+        } else {
+            self.do_complete();
+        }
+    }
+
+    fn do_complete(&mut self) {
+        self.confirm_complete_open = false;
+        let Some(task) = self.detail.as_mut() else {
+            return;
+        };
+        task.completed = true; // optimistic
+        let gid = task.gid.clone();
+        let name = task.name.clone();
+        self.status = format!("Marked complete: {name}");
+        if let Some(client) = self.client.clone() {
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                if let Err(err) = client.set_completed(&gid, true).await {
+                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
+                        "mark complete failed: {err:#}"
+                    )))));
+                }
+            });
+        }
+    }
+
+    fn copy_link(&mut self) {
+        let Some(url) = self.detail.as_ref().and_then(|t| t.permalink_url.clone()) else {
+            self.status = "No link available for this task.".into();
+            return;
+        };
+        match arboard::Clipboard::new().and_then(|mut c| c.set_text(url)) {
+            Ok(()) => self.status = "Task link copied to clipboard.".into(),
+            Err(err) => self.status = format!("Couldn't copy link: {err}"),
         }
     }
 
@@ -388,10 +515,20 @@ impl App {
             }
             AsanaUpdate::Detail(detail) => {
                 self.detail_loading = false;
+                self.detail_scroll = 0;
                 self.detail = Some(detail);
+            }
+            AsanaUpdate::Stories { gid, stories } => {
+                // Ignore stories for a task we've navigated away from.
+                if self.detail.as_ref().is_some_and(|t| t.gid == gid) {
+                    self.stories_loading = false;
+                    self.stories = stories;
+                    self.thread_scroll = 0;
+                }
             }
             AsanaUpdate::Error(message) => {
                 self.detail_loading = false;
+                self.stories_loading = false;
                 self.status = format!("Asana error: {message}");
             }
         }
@@ -427,12 +564,17 @@ impl App {
         self.selected = Some((section, task));
         self.status = format!("Selected: {}", task_obj.name);
         self.ensure_visible();
+        self.stories.clear();
+        self.detail_scroll = 0;
+        self.thread_scroll = 0;
         if self.client.is_some() {
             self.detail = None;
             self.detail_loading = true;
+            self.stories_loading = true;
             self.load_detail(task_obj.gid);
         } else {
             self.detail = Some(demo_detail(&task_obj));
+            self.stories = demo_stories();
         }
     }
 
@@ -517,8 +659,9 @@ impl App {
             self.status = format!("Moving {task_name}…");
             tokio::spawn(async move {
                 if let Err(err) = client.set_assignee_section(&task_gid, &section_gid).await {
-                    let _ =
-                        tx.send(Event::Asana(AsanaUpdate::Error(format!("move failed: {err:#}"))));
+                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
+                        "move failed: {err:#}"
+                    )))));
                 }
             });
         } else {
@@ -528,9 +671,9 @@ impl App {
                     .move_task_in_section(&section_gid, &task_gid, insert_before.as_deref())
                     .await
                 {
-                    let _ = tx.send(Event::Asana(AsanaUpdate::Error(format!(
+                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
                         "reorder failed: {err:#}"
-                    ))));
+                    )))));
                 }
             });
         }
@@ -564,7 +707,7 @@ impl App {
                 Ok(sections) => AsanaUpdate::Tasks { key, sections },
                 Err(err) => AsanaUpdate::Error(format!("{err:#}")),
             };
-            let _ = tx.send(Event::Asana(update));
+            let _ = tx.send(Event::Asana(Box::new(update)));
         });
     }
 
@@ -572,13 +715,23 @@ impl App {
         let Some(client) = self.client.clone() else {
             return;
         };
+        // Fetch the task detail and its stories concurrently.
         let tx = self.tx.clone();
+        let detail_client = client.clone();
+        let detail_gid = gid.clone();
         tokio::spawn(async move {
-            let update = match client.task(&gid).await {
+            let update = match detail_client.task(&detail_gid).await {
                 Ok(detail) => AsanaUpdate::Detail(detail),
                 Err(err) => AsanaUpdate::Error(format!("{err:#}")),
             };
-            let _ = tx.send(Event::Asana(update));
+            let _ = tx.send(Event::Asana(Box::new(update)));
+        });
+
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(stories) = client.stories(&gid).await {
+                let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Stories { gid, stories })));
+            }
         });
     }
 
@@ -768,6 +921,11 @@ fn demo_task(gid: &str, name: &str, completed: bool, due: Option<&str>) -> Task 
                 "2. Development".to_string()
             }),
         }],
+        notes: format!(
+            "Demo description for \"{name}\".\n\nConnect a real account with \
+             `ninjasana login` to see live notes, fields, and the comment thread."
+        ),
+        permalink_url: None,
     }
 }
 
@@ -817,18 +975,30 @@ fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
     }
 }
 
-fn demo_detail(task: &Task) -> TaskDetail {
-    TaskDetail {
-        gid: task.gid.clone(),
-        name: task.name.clone(),
-        completed: task.completed,
-        notes: "This is demo detail. Connect a real account with `ninjasana login` to see \
-                live task notes, assignee, and due date."
-            .to_string(),
-        assignee: task.assignee.clone(),
-        due_on: task.due_on.clone(),
-        permalink_url: None,
-    }
+fn demo_detail(task: &Task) -> Task {
+    task.clone()
+}
+
+fn demo_stories() -> Vec<Story> {
+    use crate::asana::Story;
+    vec![
+        Story {
+            kind: "system".to_string(),
+            text: "created this task".to_string(),
+            created_at: "2026-06-09T14:00:00.000Z".to_string(),
+            created_by: Some(Named {
+                name: "You (demo)".to_string(),
+            }),
+        },
+        Story {
+            kind: "comment".to_string(),
+            text: "This is a demo comment. Log in to see the real thread.".to_string(),
+            created_at: "2026-06-09T15:30:00.000Z".to_string(),
+            created_by: Some(Named {
+                name: "A Teammate".to_string(),
+            }),
+        },
+    ]
 }
 
 async fn bootstrap(

@@ -7,9 +7,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use crate::app::{App, AppMode, DropTarget, Nav, Zone};
+use crate::app::{ActivityTab, App, AppMode, DropTarget, Nav, Zone};
+use crate::asana::Task;
 use crate::settings::Column;
 
 const ACCENT: Color = Color::Cyan;
@@ -38,6 +39,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         AppMode::Full => render_full_body(frame, app, body),
     }
     render_status(frame, app, status);
+
+    // Modal overlay last, so its zones sit on top.
+    if app.confirm_complete_open {
+        render_confirm_dialog(frame, app);
+    }
 }
 
 fn render_full_body(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -327,55 +333,290 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_type(BorderType::Rounded);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.detail_upper_rect = None;
+    app.detail_thread_rect = None;
 
-    let lines: Vec<Line> = match &app.detail {
-        Some(detail) => {
-            let status = if detail.completed {
-                Span::styled("● completed", Style::new().fg(Color::Green))
-            } else {
-                Span::styled("○ incomplete", Style::new().fg(Color::Yellow))
-            };
-            let assignee = detail
-                .assignee
-                .as_ref()
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| "unassigned".to_string());
-            let due = detail.due_on.clone().unwrap_or_else(|| "—".to_string());
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
 
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    detail.name.clone(),
-                    Style::new().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(status),
-                Line::from(format!("Assignee: {assignee}")),
-                Line::from(format!("Due: {due}")),
-            ];
-            if let Some(url) = &detail.permalink_url {
-                lines.push(Line::from(Span::styled(
-                    url.clone(),
-                    Style::new().fg(Color::Blue),
-                )));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Notes",
-                Style::new().fg(Color::DarkGray),
-            )));
-            for line in detail.notes.lines() {
-                lines.push(Line::from(line.to_string()));
-            }
-            lines
-        }
-        None if app.detail_loading => vec![Line::from("Loading…")],
-        None => vec![Line::from(Span::styled(
-            "Select a task to see its details.",
-            Style::new().fg(Color::DarkGray),
-        ))],
+    let Some(task) = app.detail.clone() else {
+        let msg = if app.detail_loading {
+            "Loading…"
+        } else {
+            "Select a task to see its details."
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::new().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
     };
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // buttons · title · [ description + fields ] · tabs · [ thread ]
+    let [buttons, title_area, body] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    render_detail_buttons(frame, app, &task, buttons);
+    frame.render_widget(
+        Paragraph::new(task.name.clone())
+            .style(Style::new().add_modifier(Modifier::BOLD))
+            .wrap(Wrap { trim: false }),
+        title_area,
+    );
+
+    let [upper, tabbar, thread] = Layout::vertical([
+        Constraint::Percentage(40),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(body);
+    app.detail_upper_rect = Some(upper);
+    app.detail_thread_rect = Some(thread);
+
+    render_detail_upper(frame, app, &task, upper);
+    render_activity_tabs(frame, app, tabbar);
+    render_thread(frame, app, thread);
+}
+
+fn render_detail_buttons(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
+    if area.width < 10 {
+        return;
+    }
+    let (label, style) = if task.completed {
+        (
+            " ✓ Completed ",
+            Style::new().fg(Color::Black).bg(Color::Green),
+        )
+    } else {
+        (
+            " ✓ Mark complete ",
+            Style::new()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let w = (label.chars().count() as u16).min(area.width);
+    let complete_rect = Rect {
+        width: w,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(label).style(style), complete_rect);
+    app.zones.push(Zone::MarkComplete, complete_rect);
+
+    let copy = " Copy Link ";
+    let cw = copy.chars().count() as u16;
+    if area.width > w + cw + 1 {
+        let copy_rect = Rect {
+            x: area.x + area.width - cw,
+            width: cw,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(copy).style(Style::new().fg(Color::White).bg(Color::Blue)),
+            copy_rect,
+        );
+        app.zones.push(Zone::CopyLink, copy_rect);
+    }
+}
+
+fn render_detail_upper(frame: &mut Frame, app: &App, task: &Task, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.detail_cfg.show_description && !task.notes.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Description",
+            Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        )));
+        for line in task.notes.lines() {
+            lines.push(Line::from(line.to_string()));
+        }
+        lines.push(Line::from(""));
+    }
+
+    for column in &app.detail_cfg.fields {
+        let value = column.value(task);
+        let shown = if value.is_empty() { "—".to_string() } else { value.clone() };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}: ", column.title()),
+                Style::new().fg(Color::DarkGray),
+            ),
+            Span::styled(shown, field_value_style(column, &value)),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_scroll as u16, 0)),
+        area,
+    );
+}
+
+fn render_activity_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
+    let tabs = [
+        (ActivityTab::Comments, " Comments "),
+        (ActivityTab::AllActivity, " All activity "),
+    ];
+    let mut x = area.x;
+    for (tab, label) in tabs {
+        let w = label.chars().count() as u16;
+        if x + w > area.x + area.width {
+            break;
+        }
+        let rect = Rect {
+            x,
+            y: area.y,
+            width: w,
+            height: 1,
+        };
+        let style = if app.activity_tab == tab {
+            Style::new()
+                .fg(Color::Black)
+                .bg(ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        };
+        frame.render_widget(Paragraph::new(label).style(style), rect);
+        app.zones.push(Zone::Tab(tab), rect);
+        x += w + 1;
+    }
+}
+
+fn render_thread(frame: &mut Frame, app: &App, area: Rect) {
+    let comments_only = app.activity_tab == ActivityTab::Comments;
+    let stories: Vec<_> = app
+        .stories
+        .iter()
+        .filter(|s| !comments_only || s.is_comment())
+        .collect();
+
+    if stories.is_empty() {
+        let msg = if app.stories_loading {
+            "Loading…"
+        } else if comments_only {
+            "No comments yet."
+        } else {
+            "No activity yet."
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::new().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    for story in stories {
+        let author = story
+            .created_by
+            .as_ref()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "Someone".to_string());
+        lines.push(Line::from(vec![
+            Span::styled(author, Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("  ·  {}", format_time(&story.created_at)),
+                Style::new().fg(Color::DarkGray),
+            ),
+        ]));
+        for line in story.text.lines() {
+            lines.push(Line::from(line.to_string()));
+        }
+        lines.push(Line::from(""));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.thread_scroll as u16, 0)),
+        area,
+    );
+}
+
+fn render_confirm_dialog(frame: &mut Frame, app: &mut App) {
+    let screen = frame.area();
+    let w = 44u16.min(screen.width.saturating_sub(2));
+    let h = 7u16.min(screen.height.saturating_sub(2));
+    let rect = Rect {
+        x: screen.x + (screen.width.saturating_sub(w)) / 2,
+        y: screen.y + (screen.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Confirm ")
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let name = app
+        .detail
+        .as_ref()
+        .map(|t| t.name.clone())
+        .unwrap_or_default();
+    let [text_area, _gap, button_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!("Mark complete?\n{name}")).wrap(Wrap { trim: false }),
+        text_area,
+    );
+
+    // [ Yes ]   [ No ] centered.
+    let yes = " Yes ";
+    let no = " No ";
+    let (yw, nw) = (yes.len() as u16, no.len() as u16);
+    let total = yw + nw + 3;
+    let start = button_area.x + (button_area.width.saturating_sub(total)) / 2;
+    let yes_rect = Rect {
+        x: start,
+        width: yw,
+        ..button_area
+    };
+    let no_rect = Rect {
+        x: start + yw + 3,
+        width: nw,
+        ..button_area
+    };
+    frame.render_widget(
+        Paragraph::new(yes).style(Style::new().fg(Color::Black).bg(Color::Green)),
+        yes_rect,
+    );
+    frame.render_widget(
+        Paragraph::new(no).style(Style::new().fg(Color::White).bg(Color::Red)),
+        no_rect,
+    );
+    app.zones.push(Zone::ConfirmYes, yes_rect);
+    app.zones.push(Zone::ConfirmNo, no_rect);
+}
+
+/// Color a detail field value like the table: tags magenta, status-style custom
+/// fields by keyword, others plain.
+fn field_value_style(column: &Column, value: &str) -> Style {
+    match column {
+        Column::Tags => Style::new().fg(Color::Magenta),
+        Column::Custom(_) if !value.is_empty() => Style::new().fg(status_color(value)),
+        _ => Style::new(),
+    }
+}
+
+/// Trim an ISO-8601 timestamp to `YYYY-MM-DD HH:MM`.
+fn format_time(iso: &str) -> String {
+    let trimmed: String = iso.chars().take(16).collect();
+    trimmed.replace('T', " ")
 }
 
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {

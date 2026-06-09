@@ -48,8 +48,11 @@ The full view mirrors how Asana looks in the browser, in three panes:
   Tasks show an open circle (`○`); a row click only opens its detail, so you can
   never accidentally complete a task. Tags and status-style custom fields are
   color-coded.
-- **Right — Detail.** The selected task's details (status, assignee, due date,
-  notes, permalink), shown once a task is selected.
+- **Right — Detail.** The selected task, shown once one is selected: a
+  **Mark complete** button (with optional confirmation) and a **Copy link**
+  button, the title, an optional **description**, your configured **fields**,
+  and a scrollable **Comments / All activity** conversation with two tabs —
+  mirroring Asana's web task pane.
 
 You can also open a single task straight to the detail pane from its URL, which
 is handy as a quick `$EDITOR`-style "open this task" command.
@@ -146,9 +149,14 @@ ninjasana --help          # full help
 | Click a task row | Open its detail pane (never completes the task) |
 | **Drag a task row** | Reorder within / across sections |
 | **Drag a column divider** (`│`) | Resize that column |
-| Scroll wheel | Scroll the task list |
+| Scroll wheel | Scroll whichever region is under the cursor (task list, description/fields, or conversation) |
 | ↑ / ↓ or `j` / `k` | Move task selection |
+| Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
+| Click **Copy Link** | Copy the task's URL to the clipboard |
+| Click **Comments** / **All activity** | Switch the conversation tab |
 | Click **Quit** / `q` / `Esc` | Exit |
+
+In the confirmation dialog: `y` / Enter confirms, `n` / Esc cancels.
 
 ## Configuration
 
@@ -169,6 +177,13 @@ columns = ["name", "due_date", "assignee", "projects", "tags"]
 # ...or an explicit, ordered list of project names to show exactly those:
 #   projects = ["ISMS", "Sprint - Maximilian", "Software Department"]
 projects = "favorites"
+
+# The task detail pane (right side).
+[detail]
+show_description = true    # show the task description?
+confirm_complete = true    # confirm before marking a task complete?
+# Fields listed under the description, in order — same tokens as `columns`:
+fields = ["assignee", "due_date", "custom:Dev Status v2"]
 ```
 
 ### Columns
@@ -192,6 +207,16 @@ list, so `projects` offers three options:
 - An explicit **list of project names** — reproduces a curated sidebar exactly.
   Names are matched case-insensitively against all projects in your workspace
   and shown in the order you list them.
+
+### Detail pane
+
+The `[detail]` table controls the right-hand task pane:
+
+- `show_description` — whether the task description is shown.
+- `confirm_complete` — whether **Mark complete** asks before completing.
+- `fields` — the fields listed under the description, in order, using the same
+  tokens as `columns` (built-ins and `custom:<field>`). The title is always
+  shown; the Comments / All activity tabs always follow.
 
 ## Where your data lives
 
