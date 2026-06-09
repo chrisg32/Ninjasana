@@ -52,6 +52,13 @@ The full view mirrors how Asana looks in the browser, in three panes:
 You can also open a single task straight to the detail pane from its URL, which
 is handy as a quick `$EDITOR`-style "open this task" command.
 
+**Live updates.** Both the task list and the open task stay in sync with Asana
+automatically. Ninjasana watches them through Asana's Events API (incremental
+sync tokens — no webhook server, no full-table polling), so when a change
+happens elsewhere — you edit it in the web app, a teammate comments, or an Asana
+rule reassigns it — the relevant pane refreshes within a few seconds, keeping
+your scroll position.
+
 ## Requirements
 
 - **Rust** (stable). Install via [rustup](https://rustup.rs).

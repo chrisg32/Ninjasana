@@ -6,6 +6,8 @@
 //! mode, the rectangles we hit-test against are the very same ones we just laid
 //! out — one coordinate system, no second source of truth.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -16,7 +18,9 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::asana::{AsanaUpdate, Client, Named, Project, Section, Story, Task, TaskListKey};
+use crate::asana::{
+    AsanaUpdate, Client, Named, Project, Section, Story, Task, TaskListKey, WatchTarget,
+};
 use crate::event::{Event, EventBus};
 use crate::settings::{Column, DetailConfig, ProjectSource};
 use crate::state::UiState;
@@ -236,6 +240,16 @@ pub struct App {
     /// Number of task/header rows the middle pane can show; set each render.
     pub viewport_rows: usize,
 
+    // Live-update watchers (Asana Events API). The generation counters retire
+    // stale watcher tasks when the watched resource changes.
+    detail_watch_gen: Arc<AtomicU64>,
+    list_watch_gen: Arc<AtomicU64>,
+    /// The resource gid the list pane is watching (project gid, or the user's
+    /// task-list gid for My Tasks).
+    list_resource: Option<String>,
+    /// The user's task-list gid (My Tasks watch resource), learned at bootstrap.
+    my_tasks_resource: Option<String>,
+
     // Right pane.
     /// The gid of the task whose detail is currently shown / loading. Used to
     /// match async detail/stories/subtasks responses to the current selection.
@@ -321,6 +335,10 @@ impl App {
             scroll: 0,
             selected: None,
             viewport_rows: 0,
+            detail_watch_gen: Arc::new(AtomicU64::new(0)),
+            list_watch_gen: Arc::new(AtomicU64::new(0)),
+            list_resource: None,
+            my_tasks_resource: None,
             detail_gid: None,
             detail: None,
             detail_loading: false,
@@ -374,7 +392,8 @@ impl App {
                     self.detail_gid = Some(gid.clone());
                     self.detail_loading = true;
                     self.stories_loading = true;
-                    self.load_detail(gid);
+                    self.load_detail(gid.clone());
+                    self.watch_detail(gid);
                 } else {
                     self.status =
                         "No Asana credentials — run `ninjasana login` first. Press q to quit."
@@ -402,10 +421,11 @@ impl App {
             let source = self.project_source.clone();
             tokio::spawn(async move {
                 let update = match bootstrap(&client, source).await {
-                    Ok((user, workspace, projects)) => AsanaUpdate::Bootstrap {
+                    Ok((user, workspace, projects, my_tasks_resource)) => AsanaUpdate::Bootstrap {
                         user,
                         workspace,
                         projects,
+                        my_tasks_resource,
                     },
                     Err(err) => AsanaUpdate::Error(format!("{err:#}")),
                 };
@@ -1134,13 +1154,16 @@ impl App {
                 user,
                 workspace,
                 projects,
+                my_tasks_resource,
             } => {
                 self.status = format!("Connected as {} ({}).", user.name, workspace.name);
                 self.user_name = Some(user.name);
                 self.user_gid = Some(user.gid);
                 self.workspace = Some(workspace.gid);
                 self.projects = projects;
+                self.my_tasks_resource = (!my_tasks_resource.is_empty()).then_some(my_tasks_resource);
                 self.load_tasks_for(self.nav);
+                self.watch_list_for_nav();
             }
             AsanaUpdate::Tasks { key, sections } => {
                 // Ignore responses for a list the user has since navigated away from.
@@ -1152,11 +1175,10 @@ impl App {
             }
             AsanaUpdate::Detail(detail) => {
                 // Match against the in-flight gid (detail may arrive after we
-                // started loading a different task).
+                // started loading a different task). Scroll offsets are reset in
+                // `open_task`, not here, so a live refresh keeps your place.
                 if self.detail_gid.as_deref() == Some(detail.gid.as_str()) {
                     self.detail_loading = false;
-                    self.desc_scroll = 0;
-                    self.props_scroll = 0;
                     self.detail = Some(detail);
                 }
             }
@@ -1164,7 +1186,6 @@ impl App {
                 if self.detail_gid.as_deref() == Some(gid.as_str()) {
                     self.stories_loading = false;
                     self.stories = stories;
-                    self.thread_scroll = 0;
                 }
             }
             AsanaUpdate::Subtasks { gid, subtasks } => {
@@ -1173,6 +1194,7 @@ impl App {
                 }
             }
             AsanaUpdate::Users(users) => self.users = users,
+            AsanaUpdate::ResourceChanged { target, gid } => self.on_resource_changed(target, &gid),
             AsanaUpdate::Error(message) => {
                 self.detail_loading = false;
                 self.stories_loading = false;
@@ -1192,6 +1214,7 @@ impl App {
         if self.client.is_some() {
             self.status = format!("Loading {}…", self.nav_title());
             self.load_tasks_for(nav);
+            self.watch_list_for_nav();
         } else {
             self.set_sections(demo_sections_for(nav, &self.projects));
             let count: usize = self.sections.iter().map(|s| s.tasks.len()).sum();
@@ -1233,6 +1256,7 @@ impl App {
             self.detail_loading = true;
             self.stories_loading = true;
             self.load_detail(task.gid.clone());
+            self.watch_detail(task.gid.clone());
         } else {
             self.detail = Some(demo_detail(task));
             self.stories = demo_stories();
@@ -1405,6 +1429,60 @@ impl App {
                 let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Subtasks { gid, subtasks })));
             }
         });
+    }
+
+    // ---- live updates (Events API) -------------------------------------
+
+    /// Watch the open task for changes, retiring any previous detail watcher.
+    fn watch_detail(&self, gid: String) {
+        if let Some(client) = self.client.clone() {
+            let generation = self.detail_watch_gen.fetch_add(1, Ordering::SeqCst) + 1;
+            spawn_watch(
+                client,
+                gid,
+                WatchTarget::Detail,
+                self.detail_watch_gen.clone(),
+                generation,
+                self.tx.clone(),
+            );
+        }
+    }
+
+    /// Watch the current list's resource (project gid, or the My Tasks list).
+    fn watch_list_for_nav(&mut self) {
+        let resource = match self.nav {
+            Nav::MyTasks => self.my_tasks_resource.clone(),
+            Nav::Project(i) => self.projects.get(i).map(|p| p.gid.clone()),
+        };
+        self.list_resource = resource.clone();
+        if let (Some(client), Some(resource)) = (self.client.clone(), resource) {
+            let generation = self.list_watch_gen.fetch_add(1, Ordering::SeqCst) + 1;
+            spawn_watch(
+                client,
+                resource,
+                WatchTarget::List,
+                self.list_watch_gen.clone(),
+                generation,
+                self.tx.clone(),
+            );
+        }
+    }
+
+    /// React to a watcher detecting a change, ignoring stale resources.
+    fn on_resource_changed(&mut self, target: WatchTarget, gid: &str) {
+        match target {
+            WatchTarget::Detail => {
+                if self.detail_gid.as_deref() == Some(gid) {
+                    // Refresh in place; scroll offsets are preserved.
+                    self.load_detail(gid.to_string());
+                }
+            }
+            WatchTarget::List => {
+                if self.list_resource.as_deref() == Some(gid) {
+                    self.load_tasks_for(self.nav);
+                }
+            }
+        }
     }
 
     // ---- helpers -------------------------------------------------------
@@ -1686,10 +1764,50 @@ fn demo_stories() -> Vec<Story> {
     ]
 }
 
+/// Spawn a background poller for `resource` via the Events API. It exits as soon
+/// as `generation` no longer matches `mine` — i.e. a newer watcher replaced it,
+/// or the channel closed. On a detected change it sends a `ResourceChanged`.
+fn spawn_watch(
+    client: Client,
+    resource: String,
+    target: WatchTarget,
+    generation: Arc<AtomicU64>,
+    mine: u64,
+    tx: UnboundedSender<Event>,
+) {
+    tokio::spawn(async move {
+        let mut sync: Option<String> = None;
+        loop {
+            if generation.load(Ordering::SeqCst) != mine {
+                return;
+            }
+            // A transient error just falls through to the retry delay.
+            if let Ok((new_sync, changed)) = client.events(&resource, sync.as_deref()).await {
+                sync = Some(new_sync);
+                if changed {
+                    let update = AsanaUpdate::ResourceChanged {
+                        target,
+                        gid: resource.clone(),
+                    };
+                    if tx.send(Event::Asana(Box::new(update))).is_err() {
+                        return;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(4)).await;
+        }
+    });
+}
+
 async fn bootstrap(
     client: &Client,
     source: ProjectSource,
-) -> Result<(crate::asana::User, crate::asana::Workspace, Vec<Project>)> {
+) -> Result<(
+    crate::asana::User,
+    crate::asana::Workspace,
+    Vec<Project>,
+    String,
+)> {
     let user = client.me().await?;
     let workspace = client
         .workspaces()
@@ -1705,7 +1823,12 @@ async fn bootstrap(
             order_by_names(all, &names)
         }
     };
-    Ok((user, workspace, projects))
+    // The user's task-list gid is the watch resource for My Tasks (best-effort).
+    let my_tasks_resource = client
+        .user_task_list_gid(&workspace.gid, &user.gid)
+        .await
+        .unwrap_or_default();
+    Ok((user, workspace, projects, my_tasks_resource))
 }
 
 /// Resolve a drag from `from` to a `target` into a final `(section, index)` to

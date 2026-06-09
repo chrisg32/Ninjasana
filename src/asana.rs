@@ -22,14 +22,25 @@ pub enum TaskListKey {
     Project(String),
 }
 
+/// What a change-watcher is watching, so the app can route a detected change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchTarget {
+    /// The task shown in the detail pane.
+    Detail,
+    /// The list shown in the middle pane.
+    List,
+}
+
 /// A result handed back to the UI thread from an async Asana call.
 #[derive(Debug, Clone)]
 pub enum AsanaUpdate {
-    /// Initial load: identity, workspace, and the member-project list.
+    /// Initial load: identity, workspace, the member-project list, and the
+    /// user's task-list gid (the watch resource for My Tasks).
     Bootstrap {
         user: User,
         workspace: Workspace,
         projects: Vec<Project>,
+        my_tasks_resource: String,
     },
     /// Section-grouped tasks for a given list.
     Tasks {
@@ -44,6 +55,8 @@ pub enum AsanaUpdate {
     Subtasks { gid: String, subtasks: Vec<Task> },
     /// Workspace users (for assignee / people pickers).
     Users(Vec<User>),
+    /// A watched resource changed; the app should refresh it.
+    ResourceChanged { target: WatchTarget, gid: String },
     /// Something went wrong; carries a human-readable message.
     Error(String),
 }
@@ -575,6 +588,55 @@ impl Client {
             json!({ "data": { field: value } }),
         )
         .await
+    }
+
+    /// Resolve the user's task-list gid (the watch resource for My Tasks).
+    pub async fn user_task_list_gid(&self, workspace_gid: &str, user_gid: &str) -> Result<String> {
+        let utl: UserTaskList = self
+            .get(
+                &format!("users/{user_gid}/user_task_list"),
+                &[("workspace", workspace_gid)],
+            )
+            .await?;
+        Ok(utl.gid)
+    }
+
+    /// Poll the events endpoint for a resource. Returns `(new_sync_token,
+    /// changed)`. A first call (no sync) returns a fresh token with
+    /// `changed == false`; an expired token (HTTP 412 with a prior token)
+    /// reports `changed == true` so the caller does a full refresh.
+    pub async fn events(&self, resource_gid: &str, sync: Option<&str>) -> Result<(String, bool)> {
+        let mut query: Vec<(&str, &str)> = vec![("resource", resource_gid)];
+        if let Some(s) = sync {
+            query.push(("sync", s));
+        }
+        let resp = self
+            .http
+            .get(self.url("events", &query))
+            .bearer_auth(&self.config.token)
+            .send()
+            .await
+            .context("polling events")?;
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let new_sync = body
+            .get("sync")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        if status.as_u16() == 412 {
+            // Token (re)established. Force a refresh only if we had one before.
+            return Ok((new_sync, sync.is_some()));
+        }
+        if !status.is_success() {
+            anyhow::bail!("events returned {status}");
+        }
+        let changed = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .is_some_and(|a| !a.is_empty());
+        Ok((new_sync, changed))
     }
 
     /// Users in a workspace (for assignee / people-field pickers).
