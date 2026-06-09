@@ -260,13 +260,17 @@ pub struct App {
     pub popup_scroll: usize,
     /// Cached workspace users (for assignee / people pickers).
     pub users: Vec<crate::asana::User>,
-    /// Scroll offset of the description+fields region.
-    pub detail_scroll: usize,
-    /// Scroll offset of the conversation region.
+    /// Per-region scroll offsets in the detail pane.
+    pub desc_scroll: usize,
+    pub props_scroll: usize,
+    pub subtasks_scroll: usize,
     pub thread_scroll: usize,
-    /// Screen rects of the two scrollable detail regions (set each render).
-    pub detail_upper_rect: Option<Rect>,
-    pub detail_thread_rect: Option<Rect>,
+    /// Screen rects of each scrollable detail region (set each render), used to
+    /// route the scroll wheel to the region under the cursor.
+    pub desc_rect: Option<Rect>,
+    pub props_rect: Option<Rect>,
+    pub subtasks_rect: Option<Rect>,
+    pub thread_rect: Option<Rect>,
     /// Whether the mark-complete confirmation dialog is open.
     pub confirm_complete_open: bool,
     /// Detail pane configuration.
@@ -331,10 +335,14 @@ impl App {
             people_query: String::new(),
             popup_scroll: 0,
             users: Vec::new(),
-            detail_scroll: 0,
+            desc_scroll: 0,
+            props_scroll: 0,
+            subtasks_scroll: 0,
             thread_scroll: 0,
-            detail_upper_rect: None,
-            detail_thread_rect: None,
+            desc_rect: None,
+            props_rect: None,
+            subtasks_rect: None,
+            thread_rect: None,
             confirm_complete_open: false,
             detail_cfg,
             show_header,
@@ -588,14 +596,17 @@ impl App {
         }
     }
 
-    /// Scroll whichever region the cursor is over: the conversation thread, the
-    /// description/fields region, or (default) the task list.
+    /// Scroll whichever detail region the cursor is over, else the task list.
     fn scroll_at(&mut self, column: u16, row: u16, delta: isize) {
         let pos = Position { x: column, y: row };
-        let target = if self.detail_thread_rect.is_some_and(|r| r.contains(pos)) {
+        let target = if self.thread_rect.is_some_and(|r| r.contains(pos)) {
             &mut self.thread_scroll
-        } else if self.detail_upper_rect.is_some_and(|r| r.contains(pos)) {
-            &mut self.detail_scroll
+        } else if self.desc_rect.is_some_and(|r| r.contains(pos)) {
+            &mut self.desc_scroll
+        } else if self.props_rect.is_some_and(|r| r.contains(pos)) {
+            &mut self.props_scroll
+        } else if self.subtasks_rect.is_some_and(|r| r.contains(pos)) {
+            &mut self.subtasks_scroll
         } else {
             &mut self.scroll
         };
@@ -1144,7 +1155,8 @@ impl App {
                 // started loading a different task).
                 if self.detail_gid.as_deref() == Some(detail.gid.as_str()) {
                     self.detail_loading = false;
-                    self.detail_scroll = 0;
+                    self.desc_scroll = 0;
+                    self.props_scroll = 0;
                     self.detail = Some(detail);
                 }
             }
@@ -1212,7 +1224,9 @@ impl App {
         self.picklist = None;
         self.datepicker = None;
         self.people_picker = None;
-        self.detail_scroll = 0;
+        self.desc_scroll = 0;
+        self.props_scroll = 0;
+        self.subtasks_scroll = 0;
         self.thread_scroll = 0;
         if self.client.is_some() {
             self.detail = None;

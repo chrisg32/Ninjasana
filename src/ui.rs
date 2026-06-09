@@ -354,8 +354,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_type(BorderType::Rounded);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.detail_upper_rect = None;
-    app.detail_thread_rect = None;
+    // Stale rects shouldn't capture the wheel when a region isn't shown.
+    app.desc_rect = None;
+    app.props_rect = None;
+    app.subtasks_rect = None;
+    app.thread_rect = None;
 
     if inner.height == 0 || inner.width == 0 {
         return;
@@ -374,7 +377,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
 
-    // buttons · title · [ description + fields ] · tabs · [ thread ]
     let [buttons, title_area, body] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
@@ -390,21 +392,144 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         title_area,
     );
 
-    // upper (description + fields + subtasks) · tabs · thread · composer
-    let [upper, tabbar, thread, composer] = Layout::vertical([
-        Constraint::Percentage(45),
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(3),
-    ])
-    .areas(body);
-    app.detail_upper_rect = Some(upper);
-    app.detail_thread_rect = Some(thread);
+    // Each region is its own bordered, independently-scrollable box. Description
+    // and Subtasks only appear when they have content.
+    enum Seg {
+        Description,
+        Properties,
+        Subtasks,
+        Tabs,
+        Thread,
+        Composer,
+    }
+    let show_desc = app.detail_cfg.show_description && !task.notes.trim().is_empty();
+    let mut segs: Vec<(Seg, Constraint)> = Vec::new();
+    if show_desc {
+        segs.push((Seg::Description, Constraint::Fill(2)));
+    }
+    segs.push((Seg::Properties, Constraint::Fill(3)));
+    if !app.subtasks.is_empty() {
+        segs.push((Seg::Subtasks, Constraint::Fill(2)));
+    }
+    segs.push((Seg::Tabs, Constraint::Length(1)));
+    segs.push((Seg::Thread, Constraint::Fill(4)));
+    segs.push((Seg::Composer, Constraint::Length(3)));
 
-    render_detail_upper(frame, app, &task, upper);
-    render_activity_tabs(frame, app, tabbar);
-    render_thread(frame, app, thread);
-    render_composer(frame, app, composer);
+    let constraints: Vec<Constraint> = segs.iter().map(|(_, c)| *c).collect();
+    let chunks = Layout::vertical(constraints).split(body);
+    for ((seg, _), &rect) in segs.iter().zip(chunks.iter()) {
+        match seg {
+            Seg::Description => render_description_block(frame, app, &task, rect),
+            Seg::Properties => render_properties_block(frame, app, &task, rect),
+            Seg::Subtasks => render_subtasks_block(frame, app, rect),
+            Seg::Tabs => render_activity_tabs(frame, app, rect),
+            Seg::Thread => render_thread_block(frame, app, rect),
+            Seg::Composer => render_composer(frame, app, rect),
+        }
+    }
+}
+
+/// A bordered, titled region used in the detail pane.
+fn region_block(title: &str) -> Block<'_> {
+    Block::bordered()
+        .title(format!(" {title} "))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::DarkGray))
+}
+
+fn render_description_block(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
+    let block = region_block("Description");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.desc_rect = Some(inner);
+    frame.render_widget(
+        Paragraph::new(task.notes.clone())
+            .wrap(Wrap { trim: false })
+            .scroll((app.desc_scroll as u16, 0)),
+        inner,
+    );
+}
+
+fn render_properties_block(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
+    let block = region_block("Properties");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.props_rect = Some(inner);
+    if inner.height == 0 {
+        return;
+    }
+
+    let dim = Style::new().fg(Color::DarkGray);
+    let rows: Vec<Line> = app
+        .detail_cfg
+        .fields
+        .iter()
+        .map(|column| {
+            let value = column.value(task);
+            let shown = if value.is_empty() {
+                "—".to_string()
+            } else {
+                value.clone()
+            };
+            Line::from(vec![
+                Span::styled(format!("{}: ", column.title()), dim),
+                Span::styled(shown, field_value_style(column, &value)),
+            ])
+        })
+        .collect();
+
+    let start = app.props_scroll.min(rows.len().saturating_sub(1));
+    for (offset, line) in rows.iter().skip(start).take(inner.height as usize).enumerate() {
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + offset as u16,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(line.clone()), rect);
+        app.zones.push(Zone::Field(start + offset), rect);
+    }
+}
+
+fn render_subtasks_block(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = region_block("Subtasks");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.subtasks_rect = Some(inner);
+    if inner.height == 0 {
+        return;
+    }
+
+    let width = inner.width as usize;
+    let start = app.subtasks_scroll.min(app.subtasks.len().saturating_sub(1));
+    for (offset, sub) in app
+        .subtasks
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(inner.height as usize)
+    {
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + (offset - start) as u16,
+            width: inner.width,
+            height: 1,
+        };
+        let mark = if sub.completed { "✔" } else { "○" };
+        frame.render_widget(
+            Paragraph::new(fit(&format!("{mark} {}", sub.name), width)),
+            rect,
+        );
+        app.zones.push(Zone::Subtask(offset), rect);
+    }
+}
+
+fn render_thread_block(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = region_block("Conversation");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.thread_rect = Some(inner);
+    render_thread(frame, app, inner);
 }
 
 fn render_detail_buttons(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
@@ -449,88 +574,6 @@ fn render_detail_buttons(frame: &mut Frame, app: &mut App, task: &Task, area: Re
     }
 }
 
-/// A virtual row in the upper detail region. Some rows are interactive.
-struct UpperRow<'a> {
-    spans: Vec<Span<'a>>,
-    zone: Option<Zone>,
-}
-
-fn render_detail_upper(frame: &mut Frame, app: &mut App, task: &Task, area: Rect) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let width = area.width as usize;
-    let mut rows: Vec<UpperRow> = Vec::new();
-
-    let dim = Style::new().fg(Color::DarkGray);
-    let header = |s: &str| UpperRow {
-        spans: vec![Span::styled(
-            s.to_string(),
-            Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-        )],
-        zone: None,
-    };
-
-    if app.detail_cfg.show_description && !task.notes.trim().is_empty() {
-        rows.push(header("Description"));
-        for line in task.notes.lines() {
-            for chunk in wrap_hard(line, width) {
-                rows.push(UpperRow {
-                    spans: vec![Span::raw(chunk)],
-                    zone: None,
-                });
-            }
-        }
-        rows.push(UpperRow { spans: vec![], zone: None });
-    }
-
-    // Fields (clickable to edit).
-    for (i, column) in app.detail_cfg.fields.iter().enumerate() {
-        let value = column.value(task);
-        let shown = if value.is_empty() {
-            "—".to_string()
-        } else {
-            value.clone()
-        };
-        rows.push(UpperRow {
-            spans: vec![
-                Span::styled(format!("{}: ", column.title()), dim),
-                Span::styled(shown, field_value_style(column, &value)),
-            ],
-            zone: Some(Zone::Field(i)),
-        });
-    }
-
-    // Subtasks (clickable to open).
-    if !app.subtasks.is_empty() {
-        rows.push(UpperRow { spans: vec![], zone: None });
-        rows.push(header("Subtasks"));
-        for (i, sub) in app.subtasks.iter().enumerate() {
-            let mark = if sub.completed { "✔" } else { "○" };
-            rows.push(UpperRow {
-                spans: vec![Span::raw(fit(&format!("{mark} {}", sub.name), width))],
-                zone: Some(Zone::Subtask(i)),
-            });
-        }
-    }
-
-    let height = area.height as usize;
-    let start = app.detail_scroll.min(rows.len().saturating_sub(1));
-    for (offset, row) in rows.iter().enumerate().skip(start).take(height).enumerate() {
-        let (_, row) = row;
-        let rect = Rect {
-            x: area.x,
-            y: area.y + offset as u16,
-            width: area.width,
-            height: 1,
-        };
-        frame.render_widget(Paragraph::new(Line::from(row.spans.clone())), rect);
-        if let Some(zone) = &row.zone {
-            app.zones.push(zone.clone(), rect);
-        }
-    }
-}
-
 fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     let editing_comment = matches!(
         app.input.as_ref().map(|i| &i.target),
@@ -572,21 +615,6 @@ fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.input.is_none() || editing_comment {
         app.zones.push(Zone::Composer, area);
     }
-}
-
-/// Hard-wrap `text` to `width` columns (by character — fine for mostly ASCII).
-fn wrap_hard(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new()];
-    }
-    chars
-        .chunks(width)
-        .map(|c| c.iter().collect::<String>())
-        .collect()
 }
 
 fn render_activity_tabs(frame: &mut Frame, app: &mut App, area: Rect) {

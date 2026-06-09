@@ -151,7 +151,7 @@ ninjasana --help          # full help
 | Click a task row | Open its detail pane (never completes the task) |
 | **Drag a task row** | Reorder within / across sections |
 | **Drag a column divider** (`│`) | Resize that column |
-| Scroll wheel | Scroll whichever region is under the cursor (task list, description/fields, or conversation) |
+| Scroll wheel | Scroll whichever region is under the cursor (task list, or the detail pane's Description / Properties / Subtasks / Conversation) |
 | ↑ / ↓ or `j` / `k` | Move task selection |
 | Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
 | Click **Copy Link** | Copy the task's URL to the clipboard |
