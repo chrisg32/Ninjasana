@@ -243,23 +243,21 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Register a 1-column drag handle on each fixed column's right-edge divider.
-    // Spanning the full pane height makes the thin handle easy to grab.
+    // Register a 1-column drag handle on every divider (the right edge of each
+    // non-last column). Spanning the full pane height makes it easy to grab.
     let mut x = inner.x + 2;
     for (i, width) in widths.iter().enumerate() {
         x += *width as u16;
         if i + 1 < app.columns.len() {
-            if !app.columns[i].is_name() {
-                app.zones.push(
-                    Zone::ResizeHandle(i),
-                    Rect {
-                        x,
-                        y: inner.y,
-                        width: 1,
-                        height: inner.height,
-                    },
-                );
-            }
+            app.zones.push(
+                Zone::ResizeHandle(i),
+                Rect {
+                    x,
+                    y: inner.y,
+                    width: 1,
+                    height: inner.height,
+                },
+            );
             x += 1; // the divider column
         }
     }

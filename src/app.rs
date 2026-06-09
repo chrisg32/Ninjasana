@@ -93,17 +93,16 @@ pub enum Zone {
     Quit,
 }
 
-/// In-progress column resize. The dragged divider trades width with the column
-/// immediately to its right (`victim`), so the divider tracks the cursor. When
-/// the right neighbor is the flexible Name column, `victim` is `None` and that
-/// column simply absorbs the change.
+/// In-progress column resize of the divider between `left` and `right`. The
+/// divider tracks the cursor by trading width between the two columns; the
+/// flexible Name column (if it's one of them) absorbs without an explicit width.
 #[derive(Clone, Copy)]
 pub struct Resize {
-    col: usize,
+    left: usize,
+    right: usize,
     start_x: u16,
-    start_width: usize,
-    victim: Option<usize>,
-    victim_start_width: usize,
+    left_start: usize,
+    right_start: usize,
 }
 
 /// The set of clickable regions for the current frame. Rebuilt every render.
@@ -561,20 +560,15 @@ impl App {
                     return;
                 }
                 match zone {
-                    // A column divider arms a resize. The right neighbor is the
-                    // victim unless it's the flexible Name column (which absorbs).
+                    // A column divider arms a resize between it and its right
+                    // neighbor (the handle only exists when a right neighbor does).
                     Zone::ResizeHandle(col) => {
-                        let victim = self
-                            .columns
-                            .get(col + 1)
-                            .filter(|c| !c.is_name())
-                            .map(|_| col + 1);
                         self.resize = Some(Resize {
-                            col,
+                            left: col,
+                            right: col + 1,
                             start_x: mouse.column,
-                            start_width: self.effective_width(col),
-                            victim,
-                            victim_start_width: victim.map(|v| self.effective_width(v)).unwrap_or(0),
+                            left_start: self.effective_width(col),
+                            right_start: self.effective_width(col + 1),
                         });
                     }
                     // Pressing a task row selects it and arms a potential
@@ -1543,34 +1537,37 @@ impl App {
             .unwrap_or(MIN_COL_WIDTH)
     }
 
-    /// Apply a resize drag: grow/shrink the dragged column to follow the cursor,
-    /// trading width with its right neighbor (or letting the flex column absorb).
+    /// Apply a resize drag on the divider between `left` and `right`, keeping it
+    /// under the cursor. Whichever side is the flexible Name column absorbs the
+    /// change without an explicit width; otherwise the two trade width.
     fn apply_resize(&mut self, resize: Resize, cursor_x: u16) {
         let min = MIN_COL_WIDTH as i32;
         let delta = cursor_x as i32 - resize.start_x as i32;
-        let mut new_col = (resize.start_width as i32 + delta).max(min);
+        let left_flex = self.columns[resize.left].is_name();
+        let right_flex = self.columns[resize.right].is_name();
 
-        let col_key = self.columns[resize.col].key();
-        match resize.victim {
-            Some(victim) => {
-                // Trade with the right neighbor, keeping it at or above the min.
-                let max_take = (resize.victim_start_width as i32 - min).max(0);
-                let mut change = new_col - resize.start_width as i32;
-                if change > max_take {
-                    change = max_take;
-                    new_col = resize.start_width as i32 + change;
-                }
-                let new_victim = resize.victim_start_width as i32 - change;
-                let victim_key = self.columns[victim].key();
-                self.ui_state.set_column_width(&col_key, new_col as usize);
-                self.ui_state.set_column_width(&victim_key, new_victim as usize);
-            }
-            None => {
-                // The flexible Name column to the right absorbs the change.
-                self.ui_state.set_column_width(&col_key, new_col as usize);
-            }
+        if left_flex {
+            // Left side flexes: shrink the right column; flex grows to fill.
+            let new_right = (resize.right_start as i32 - delta).max(min);
+            let key = self.columns[resize.right].key();
+            self.ui_state.set_column_width(&key, new_right as usize);
+        } else if right_flex {
+            // Right side flexes: grow the left column; flex shrinks to fit.
+            let new_left = (resize.left_start as i32 + delta).max(min);
+            let key = self.columns[resize.left].key();
+            self.ui_state.set_column_width(&key, new_left as usize);
+        } else {
+            // Both fixed: trade width, keeping the right column at/above the min.
+            let max_take = (resize.right_start as i32 - min).max(0);
+            let change = (resize.left_start as i32 + delta).max(min) - resize.left_start as i32;
+            let change = change.min(max_take);
+            let left_key = self.columns[resize.left].key();
+            let right_key = self.columns[resize.right].key();
+            self.ui_state
+                .set_column_width(&left_key, (resize.left_start as i32 + change) as usize);
+            self.ui_state
+                .set_column_width(&right_key, (resize.right_start as i32 - change) as usize);
         }
-        self.status = format!("{} width: {new_col}", self.columns[resize.col].title());
     }
 
     /// Stable per-list key for the collapse store.
