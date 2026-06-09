@@ -482,16 +482,11 @@ impl Client {
         workspace_gid: &str,
         user_gid: &str,
     ) -> Result<Vec<Section>> {
-        let utl: UserTaskList = self
-            .get(
-                &format!("users/{user_gid}/user_task_list"),
-                &[("workspace", workspace_gid)],
-            )
-            .await?;
+        let utl = self.user_task_list_gid(workspace_gid, user_gid).await?;
 
         let tasks: Vec<Task> = self
             .get(
-                &format!("user_task_lists/{}/tasks", utl.gid),
+                &format!("user_task_lists/{utl}/tasks"),
                 &[
                     ("completed_since", "now"),
                     ("limit", "100"),
@@ -505,7 +500,22 @@ impl Client {
             )
             .await?;
 
-        Ok(group_by_assignee_section(tasks))
+        // The ordered section list (a user task list behaves like a project for
+        // this endpoint) — it includes empty sections like Blocked / Inbox.
+        let sections: Vec<SectionRef> = self
+            .get(
+                &format!("projects/{utl}/sections"),
+                &[("opt_fields", "name"), ("limit", "100")],
+            )
+            .await
+            .unwrap_or_default();
+
+        if sections.is_empty() {
+            // Fallback: derive sections from the tasks themselves (no empties).
+            Ok(group_by_assignee_section(tasks))
+        } else {
+            Ok(group_into_sections(sections, tasks))
+        }
     }
 
     /// Full task detail for the right-hand pane.
@@ -698,6 +708,54 @@ impl Client {
     }
 }
 
+/// Group My Tasks into a known, ordered section list (including empty sections),
+/// matching the web's My Tasks layout. Tasks whose assignee-section isn't in the
+/// list fall into a trailing "(No section)" bucket.
+fn group_into_sections(sections: Vec<SectionRef>, tasks: Vec<Task>) -> Vec<Section> {
+    let mut buckets: HashMap<String, Vec<Task>> = HashMap::new();
+    let mut orphans: Vec<Task> = Vec::new();
+    for task in tasks {
+        match task.assignee_section.as_ref().map(|s| s.gid.clone()) {
+            Some(gid) if !gid.is_empty() => buckets.entry(gid).or_default().push(task),
+            _ => orphans.push(task),
+        }
+    }
+
+    let mut out: Vec<Section> = sections
+        .into_iter()
+        .map(|s| {
+            let tasks = buckets.remove(&s.gid).unwrap_or_default();
+            let name = if s.name.is_empty() {
+                NO_SECTION.to_string()
+            } else {
+                s.name
+            };
+            Section {
+                gid: Some(s.gid),
+                name,
+                tasks,
+            }
+        })
+        .collect();
+
+    // Any sections referenced by tasks but absent from the list, then the rest.
+    for (gid, tasks) in buckets {
+        out.push(Section {
+            gid: Some(gid),
+            name: NO_SECTION.to_string(),
+            tasks,
+        });
+    }
+    if !orphans.is_empty() {
+        out.push(Section {
+            gid: None,
+            name: NO_SECTION.to_string(),
+            tasks: orphans,
+        });
+    }
+    out
+}
+
 /// Group My Tasks by their assignee-section, preserving the order in which the
 /// sections first appear (which matches the user's My Tasks ordering). Keyed by
 /// section gid so renamed/duplicate names stay distinct.
@@ -738,7 +796,38 @@ fn group_by_assignee_section(tasks: Vec<Task>) -> Vec<Section> {
 
 #[cfg(test)]
 mod tests {
-    use super::{field_name_matches, group_by_assignee_section, Task};
+    use super::{
+        field_name_matches, group_by_assignee_section, group_into_sections, SectionRef, Task,
+    };
+
+    fn section(gid: &str, name: &str) -> SectionRef {
+        SectionRef {
+            gid: gid.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn group_into_sections_preserves_order_and_keeps_empty_sections() {
+        let sections = vec![section("s1", "Now"), section("s2", "Today"), section("s3", "Inbox")];
+        let tasks: Vec<Task> = serde_json::from_str(
+            r#"[
+                {"gid":"1","name":"A","assignee_section":{"gid":"s1","name":"Now"}},
+                {"gid":"2","name":"B","assignee_section":{"gid":"s2","name":"Today"}},
+                {"gid":"3","name":"C"}
+            ]"#,
+        )
+        .unwrap();
+        let out = group_into_sections(sections, tasks);
+
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        // Inbox stays in order even though it has no tasks; the sectionless task
+        // lands in a trailing bucket.
+        assert_eq!(names, vec!["Now", "Today", "Inbox", "(No section)"]);
+        assert_eq!(out[2].tasks.len(), 0);
+        assert_eq!(out[0].tasks[0].name, "A");
+        assert_eq!(out[3].tasks[0].name, "C");
+    }
 
     #[test]
     fn field_names_match_despite_whitespace_and_case() {
