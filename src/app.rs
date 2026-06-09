@@ -1587,7 +1587,7 @@ fn demo_task(gid: &str, name: &str, completed: bool, due: Option<&str>) -> Task 
         }],
         custom_fields: vec![CustomField {
             gid: "demo-field-devstatus".to_string(),
-            name: "Dev Status v2".to_string(),
+            name: "Priority".to_string(),
             display_value: Some(if completed {
                 "Done".to_string()
             } else {
@@ -1630,7 +1630,7 @@ fn demo_sections_for(nav: Nav, projects: &[Project]) -> Vec<Section> {
                 name: "Later".to_string(),
                 tasks: vec![
                     demo_task("d-later-0", "Drag a row to reorder it", false, None),
-                    demo_task("d-later-1", "Color-coded Dev Status", false, Some("2026-07-01")),
+                    demo_task("d-later-1", "Color-coded Status", false, Some("2026-07-01")),
                 ],
             },
         ],
@@ -1881,13 +1881,13 @@ mod tests {
     #[test]
     fn order_by_names_matches_case_insensitively_in_order() {
         let all = vec![
-            project("ISMS"),
-            project("Sprint - Maximilian"),
+            project("Engineering"),
+            project("Q3 Roadmap"),
             project("Customer Support"),
         ];
         let names = vec![
-            "sprint - maximilian".to_string(),
-            "ISMS".to_string(),
+            "q3 roadmap".to_string(),
+            "Engineering".to_string(),
             "Not A Project".to_string(),
         ];
         let result: Vec<String> = order_by_names(all, &names)
@@ -1895,6 +1895,6 @@ mod tests {
             .map(|p| p.name)
             .collect();
         // Configured order is preserved; unmatched names are dropped.
-        assert_eq!(result, vec!["Sprint - Maximilian", "ISMS"]);
+        assert_eq!(result, vec!["Q3 Roadmap", "Engineering"]);
     }
 }

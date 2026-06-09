@@ -1052,7 +1052,7 @@ fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Per-column foreground styling. Tags get a tag color; custom fields (e.g.
-/// "Dev Status v2") are colored like a status pill by keyword; metadata is
+/// "Priority") are colored like a status pill by keyword; metadata is
 /// dimmed; Name keeps the default.
 fn column_style(column: &Column, value: &str) -> Style {
     match column {

@@ -228,7 +228,7 @@ impl Task {
             .collect()
     }
 
-    /// The display value of a named custom field (e.g. "Dev Status v2"), if set.
+    /// The display value of a named custom field (e.g. "Priority"), if set.
     pub fn custom_field(&self, name: &str) -> Option<String> {
         self.custom_fields
             .iter()
@@ -683,8 +683,8 @@ mod tests {
         // Asana field names sometimes carry trailing spaces (the real "Urgency " bug).
         assert!(field_name_matches("Urgency ", "Urgency"));
         assert!(field_name_matches("Customer ", "customer"));
-        assert!(field_name_matches("Dev Status v2", "Dev Status v2"));
-        assert!(!field_name_matches("Dev Status", "Dev Status v2"));
+        assert!(field_name_matches("Priority", "Priority"));
+        assert!(!field_name_matches("Status", "Priority"));
     }
 
     #[test]
@@ -720,15 +720,15 @@ mod tests {
             "gid":"9","name":"T","completed":false,
             "tags":[{"name":"infra"},{"name":"urgent"}],
             "custom_fields":[
-                {"name":"Dev Status v2","display_value":"2. Development"},
+                {"name":"Priority","display_value":"2. Development"},
                 {"name":"Empty","display_value":null}
             ],
-            "memberships":[{"project":{"name":"Chateau"}}]
+            "memberships":[{"project":{"name":"Acme"}}]
         }"#;
         let task: Task = serde_json::from_str(json).unwrap();
         assert_eq!(task.tag_names(), vec!["infra", "urgent"]);
-        assert_eq!(task.project_names(), vec!["Chateau"]);
-        assert_eq!(task.custom_field("Dev Status v2").as_deref(), Some("2. Development"));
+        assert_eq!(task.project_names(), vec!["Acme"]);
+        assert_eq!(task.custom_field("Priority").as_deref(), Some("2. Development"));
         assert_eq!(task.custom_field("Empty"), None);
         assert_eq!(task.custom_field("Missing"), None);
     }

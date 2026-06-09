@@ -13,7 +13,7 @@ dividers to resize them.
 │ Ninjasana  ·  Asana in your terminal   Your Name                    [ Quit ]│
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Navigation ──╮╭ My Tasks ───────────────────────────────────╮╭ Task ───────╮
-│★ My Tasks    ││  Name           │Due Date  │Dev Status│Tags  ││ Deploy …    │
+│★ My Tasks    ││  Name           │Due Date  │Status│Tags  ││ Deploy …    │
 │# Engineering ││▾ Now (1)                                     ││ ○ incomplete│
 │# Design       │ ○ Deploy SignalR…│2026-06-12│Development│      ││ Assignee: … │
 │# Roadmap      │▾ Today (3)                                    ││ Due: …      │
@@ -175,14 +175,14 @@ you can just edit it.
 # Columns shown in the task table, in order. Built-in columns:
 #   "name", "due_date", "assignee", "projects", "tags", "completed"
 # Custom fields use a "custom:" prefix with the exact Asana field name:
-#   "custom:Dev Status v2"
+#   "custom:Priority"
 columns = ["name", "due_date", "assignee", "projects", "tags"]
 
 # Which projects appear in the navigation pane. Either a mode...
 #   "favorites" — your favorited projects, in sidebar order (default)
 #   "member"    — every project you're a member of
 # ...or an explicit, ordered list of project names to show exactly those:
-#   projects = ["ISMS", "Sprint - Maximilian", "Software Department"]
+#   projects = ["Engineering", "Q3 Roadmap", "Marketing"]
 projects = "favorites"
 
 # Show the top header bar and bottom status bar. Applies in every mode — turn
@@ -196,7 +196,7 @@ show_footer = true
 show_description = true    # show the task description?
 confirm_complete = true    # confirm before marking a task complete?
 # Fields listed under the description, in order — same tokens as `columns`:
-fields = ["assignee", "due_date", "custom:Dev Status v2"]
+fields = ["assignee", "due_date", "custom:Priority"]
 ```
 
 ### Columns

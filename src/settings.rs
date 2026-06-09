@@ -25,7 +25,7 @@ pub enum Column {
 }
 
 impl Column {
-    /// Parse one config token, e.g. `"due_date"` or `"custom:Dev Status v2"`.
+    /// Parse one config token, e.g. `"due_date"` or `"custom:Priority"`.
     fn parse(token: &str) -> Option<Self> {
         let token = token.trim();
         if let Some(name) = token.strip_prefix("custom:") {
@@ -260,14 +260,14 @@ const DEFAULT_TOML: &str = "\
 # Columns shown in the task table, in order. Built-in columns:
 #   \"name\", \"due_date\", \"assignee\", \"projects\", \"tags\", \"completed\"
 # Custom fields use a \"custom:\" prefix with the exact Asana field name, e.g.:
-#   \"custom:Dev Status v2\"
+#   \"custom:Priority\"
 columns = [\"name\", \"due_date\", \"assignee\", \"projects\", \"tags\"]
 
 # Which projects appear in the navigation pane. Either a mode:
 #   \"favorites\" — your favorited projects, in sidebar order (default)
 #   \"member\"    — every project you're a member of
 # ...or an explicit, ordered list of project names to show exactly those:
-#   projects = [\"ISMS\", \"Sprint - Maximilian\", \"Software Department\"]
+#   projects = [\"Engineering\", \"Q3 Roadmap\", \"Marketing\"]
 projects = \"favorites\"
 
 # Show the top header bar and bottom status bar (applies in every mode).
@@ -283,7 +283,7 @@ show_description = true
 confirm_complete = true
 # Fields listed under the description, in order. Same tokens as `columns`
 # (built-ins and \"custom:<field>\"), e.g.:
-#   fields = [\"assignee\", \"due_date\", \"custom:Dev Status v2\"]
+#   fields = [\"assignee\", \"due_date\", \"custom:Priority\"]
 fields = [\"assignee\", \"due_date\", \"projects\"]
 ";
 
@@ -311,8 +311,8 @@ mod tests {
         assert_eq!(Column::parse("due_date"), Some(Column::DueDate));
         assert_eq!(Column::parse("due"), Some(Column::DueDate));
         assert_eq!(
-            Column::parse("custom:Dev Status v2"),
-            Some(Column::Custom("Dev Status v2".to_string()))
+            Column::parse("custom:Priority"),
+            Some(Column::Custom("Priority".to_string()))
         );
         assert_eq!(Column::parse("not_a_column"), None);
         assert_eq!(Column::parse("custom:"), None);
@@ -335,10 +335,10 @@ mod tests {
 
     #[test]
     fn project_source_accepts_explicit_list() {
-        let raw: RawConfig = toml::from_str(r#"projects = ["ISMS", "Sprint - Maximilian"]"#).unwrap();
+        let raw: RawConfig = toml::from_str(r#"projects = ["Engineering", "Q3 Roadmap"]"#).unwrap();
         assert_eq!(
             project_source(raw.projects.as_ref()),
-            ProjectSource::Explicit(vec!["ISMS".to_string(), "Sprint - Maximilian".to_string()])
+            ProjectSource::Explicit(vec!["Engineering".to_string(), "Q3 Roadmap".to_string()])
         );
     }
 
@@ -359,7 +359,7 @@ mod tests {
             [detail]
             show_description = false
             confirm_complete = false
-            fields = ["assignee", "custom:Dev Status v2"]
+            fields = ["assignee", "custom:Priority"]
             "#,
         )
         .unwrap();
@@ -368,7 +368,7 @@ mod tests {
         assert!(!detail.confirm_complete);
         assert_eq!(
             detail.fields,
-            vec![Column::Assignee, Column::Custom("Dev Status v2".to_string())]
+            vec![Column::Assignee, Column::Custom("Priority".to_string())]
         );
     }
 
@@ -391,8 +391,8 @@ mod tests {
     fn full_config_round_trips() {
         let raw: RawConfig = toml::from_str(
             r#"
-            columns = ["name", "custom:Dev Status v2", "tags"]
-            projects = ["ISMS"]
+            columns = ["name", "custom:Priority", "tags"]
+            projects = ["Engineering"]
             "#,
         )
         .unwrap();
@@ -400,13 +400,13 @@ mod tests {
             parse_columns(&raw.columns),
             vec![
                 Column::Name,
-                Column::Custom("Dev Status v2".to_string()),
+                Column::Custom("Priority".to_string()),
                 Column::Tags
             ]
         );
         assert_eq!(
             project_source(raw.projects.as_ref()),
-            ProjectSource::Explicit(vec!["ISMS".to_string()])
+            ProjectSource::Explicit(vec!["Engineering".to_string()])
         );
     }
 }
