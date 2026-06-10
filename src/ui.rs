@@ -410,9 +410,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
 
+    // Title height tracks how many rows the (wrapped) name needs, capped.
+    let title_h = (wrapped_lines(&task.name, inner.width as usize) as u16).clamp(1, 3);
     let [buttons, title_area, body] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(title_h),
         Constraint::Min(0),
     ])
     .areas(inner);
@@ -425,8 +427,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         title_area,
     );
 
-    // Each region is its own bordered, independently-scrollable box. Description
-    // and Subtasks only appear when they have content.
+    // Each region is its own bordered, independently-scrollable box, but heights
+    // are content-aware so space isn't wasted: Properties/Subtasks size to their
+    // (capped) content, and the leftover is split between Description and the
+    // Conversation by how much each actually needs.
     enum Seg {
         Description,
         Properties,
@@ -435,20 +439,68 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         Thread,
         Composer,
     }
+    let body_h = body.height;
+    let content_w = inner.width.saturating_sub(2) as usize; // inside a region's border
     let show_desc = app.detail_cfg.show_description && !task.notes.trim().is_empty();
-    let mut segs: Vec<(Seg, Constraint)> = Vec::new();
-    if show_desc {
-        segs.push((Seg::Description, Constraint::Fill(2)));
-    }
-    segs.push((Seg::Properties, Constraint::Fill(3)));
-    if !app.subtasks.is_empty() {
-        segs.push((Seg::Subtasks, Constraint::Fill(2)));
-    }
-    segs.push((Seg::Tabs, Constraint::Length(1)));
-    segs.push((Seg::Thread, Constraint::Fill(4)));
-    segs.push((Seg::Composer, Constraint::Length(3)));
+    let show_props = !app.detail_cfg.fields.is_empty();
+    let show_subs = !app.subtasks.is_empty();
 
-    let constraints: Vec<Constraint> = segs.iter().map(|(_, c)| *c).collect();
+    // Content-sized (border + rows), each capped so it can't hog the pane.
+    let region = |rows: usize, cap: u16| -> u16 { ((rows as u16) + 2).clamp(3, cap.max(3)) };
+    let props_h = if show_props {
+        region(app.detail_cfg.fields.len(), body_h / 3)
+    } else {
+        0
+    };
+    let subs_h = if show_subs {
+        region(app.subtasks.len(), body_h / 4)
+    } else {
+        0
+    };
+
+    // Description and Conversation share what's left (after tabs + composer).
+    let avail = body_h.saturating_sub(1 + 3 + props_h + subs_h);
+    let desc_lines = wrapped_lines(&task.notes, content_w);
+    let thread_lines = thread_line_count(app, content_w);
+    let desc_want = if show_desc {
+        ((desc_lines as u16) + 2).max(3)
+    } else {
+        0
+    };
+    let thread_want = ((thread_lines as u16) + 2).max(3);
+    let (desc_h, thread_h) = if !show_desc {
+        (0, avail)
+    } else if desc_want + thread_want <= avail {
+        // Both fit without scrolling; give the surplus to the bigger one.
+        let surplus = avail - desc_want - thread_want;
+        if desc_lines >= thread_lines {
+            (desc_want + surplus, thread_want)
+        } else {
+            (desc_want, thread_want + surplus)
+        }
+    } else {
+        // Can't both fit; split proportionally, each at least 3 rows.
+        let total = (desc_want + thread_want).max(1);
+        let d = ((avail as u32 * desc_want as u32) / total as u32) as u16;
+        let d = d.clamp(3.min(avail), avail.saturating_sub(3.min(avail)));
+        (d, avail - d)
+    };
+
+    let mut segs: Vec<(Seg, u16)> = Vec::new();
+    if show_desc {
+        segs.push((Seg::Description, desc_h));
+    }
+    if show_props {
+        segs.push((Seg::Properties, props_h));
+    }
+    if show_subs {
+        segs.push((Seg::Subtasks, subs_h));
+    }
+    segs.push((Seg::Tabs, 1));
+    segs.push((Seg::Thread, thread_h));
+    segs.push((Seg::Composer, 3));
+
+    let constraints: Vec<Constraint> = segs.iter().map(|(_, h)| Constraint::Length(*h)).collect();
     let chunks = Layout::vertical(constraints).split(body);
     for ((seg, _), &rect) in segs.iter().zip(chunks.iter()) {
         match seg {
@@ -460,6 +512,37 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             Seg::Composer => render_composer(frame, app, rect),
         }
     }
+}
+
+/// Rows that `text` occupies when hard-wrapped to `width` (counting newlines).
+fn wrapped_lines(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return text.lines().count().max(1);
+    }
+    text.lines()
+        .map(|line| {
+            let n = line.chars().count();
+            if n == 0 { 1 } else { n.div_ceil(width) }
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+/// Rows the conversation thread occupies for the active tab (for sizing).
+fn thread_line_count(app: &App, width: usize) -> usize {
+    let comments_only = app.activity_tab == ActivityTab::Comments;
+    let stories: Vec<_> = app
+        .stories
+        .iter()
+        .filter(|s| !comments_only || s.is_comment())
+        .collect();
+    if stories.is_empty() {
+        return 1;
+    }
+    stories
+        .iter()
+        .map(|s| 1 + wrapped_lines(&s.text, width) + 1)
+        .sum()
 }
 
 /// A bordered, titled region used in the detail pane.
