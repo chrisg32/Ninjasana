@@ -1083,11 +1083,11 @@ impl App {
         if let Some(client) = self.client.clone() {
             let tx = self.tx.clone();
             tokio::spawn(async move {
-                if let Err(err) = client.set_custom_field(&task_gid, &field_gid, value).await {
-                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
-                        "update failed: {err:#}"
-                    )))));
-                }
+                let update = match client.set_custom_field(&task_gid, &field_gid, value).await {
+                    Ok(()) => AsanaUpdate::Done("Field updated.".into()),
+                    Err(err) => AsanaUpdate::Error(format!("update failed: {err:#}")),
+                };
+                let _ = tx.send(Event::Asana(Box::new(update)));
             });
         }
     }
@@ -1099,12 +1099,17 @@ impl App {
         };
         if let Some(client) = self.client.clone() {
             let tx = self.tx.clone();
+            let label = match field {
+                "due_on" => "Due date",
+                "assignee" => "Assignee",
+                other => other,
+            };
             tokio::spawn(async move {
-                if let Err(err) = client.set_field(&task_gid, field, value).await {
-                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
-                        "update failed: {err:#}"
-                    )))));
-                }
+                let update = match client.set_field(&task_gid, field, value).await {
+                    Ok(()) => AsanaUpdate::Done(format!("{label} updated.")),
+                    Err(err) => AsanaUpdate::Error(format!("update failed: {err:#}")),
+                };
+                let _ = tx.send(Event::Asana(Box::new(update)));
             });
         }
     }
@@ -1155,18 +1160,24 @@ impl App {
             let tx = self.tx.clone();
             self.status = "Posting comment…".into();
             tokio::spawn(async move {
-                let update = match client.add_comment(&task_gid, &text).await {
-                    // Re-fetch the thread so the new comment appears.
-                    Ok(()) => match client.stories(&task_gid).await {
-                        Ok(stories) => AsanaUpdate::Stories {
-                            gid: task_gid,
-                            stories,
-                        },
-                        Err(err) => AsanaUpdate::Error(format!("{err:#}")),
-                    },
-                    Err(err) => AsanaUpdate::Error(format!("comment failed: {err:#}")),
-                };
-                let _ = tx.send(Event::Asana(Box::new(update)));
+                match client.add_comment(&task_gid, &text).await {
+                    // Re-fetch the thread so the new comment appears, then confirm.
+                    Ok(()) => {
+                        if let Ok(stories) = client.stories(&task_gid).await {
+                            let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Stories {
+                                gid: task_gid,
+                                stories,
+                            })));
+                        }
+                        let _ = tx
+                            .send(Event::Asana(Box::new(AsanaUpdate::Done("Comment posted.".into()))));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
+                            "comment failed: {err:#}"
+                        )))));
+                    }
+                }
             });
         } else {
             self.stories.push(Story {
@@ -1269,6 +1280,11 @@ impl App {
                 // started loading a different task). Scroll offsets are reset in
                 // `open_task`, not here, so a live refresh keeps your place.
                 if self.detail_gid.as_deref() == Some(detail.gid.as_str()) {
+                    // Clear the "Loading task…" message on the initial load only
+                    // (live refreshes don't set detail_loading, so stay quiet).
+                    if self.detail_loading {
+                        self.status = format!("Opened: {}", detail.name);
+                    }
                     self.detail_loading = false;
                     self.detail = Some(detail);
                 }
@@ -1290,6 +1306,7 @@ impl App {
                 self.status = "Task created.".into();
                 self.load_tasks_for(self.nav);
             }
+            AsanaUpdate::Done(message) => self.status = message,
             AsanaUpdate::Error(message) => {
                 self.detail_loading = false;
                 self.stories_loading = false;
@@ -1441,23 +1458,23 @@ impl App {
             }
             self.status = format!("Moving {task_name}…");
             tokio::spawn(async move {
-                if let Err(err) = client.set_assignee_section(&task_gid, &section_gid).await {
-                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
-                        "move failed: {err:#}"
-                    )))));
-                }
+                let update = match client.set_assignee_section(&task_gid, &section_gid).await {
+                    Ok(()) => AsanaUpdate::Done(format!("Moved {task_name}.")),
+                    Err(err) => AsanaUpdate::Error(format!("move failed: {err:#}")),
+                };
+                let _ = tx.send(Event::Asana(Box::new(update)));
             });
         } else {
             self.status = format!("Moving {task_name}…");
             tokio::spawn(async move {
-                if let Err(err) = client
+                let update = match client
                     .move_task_in_section(&section_gid, &task_gid, insert_before.as_deref())
                     .await
                 {
-                    let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Error(format!(
-                        "reorder failed: {err:#}"
-                    )))));
-                }
+                    Ok(()) => AsanaUpdate::Done(format!("Moved {task_name}.")),
+                    Err(err) => AsanaUpdate::Error(format!("reorder failed: {err:#}")),
+                };
+                let _ = tx.send(Event::Asana(Box::new(update)));
             });
         }
     }

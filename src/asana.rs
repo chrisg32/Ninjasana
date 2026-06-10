@@ -59,6 +59,8 @@ pub enum AsanaUpdate {
     ResourceChanged { target: WatchTarget, gid: String },
     /// A new task was created; the current list should refresh.
     TaskCreated,
+    /// An async action finished successfully; carries a status message.
+    Done(String),
     /// Something went wrong; carries a human-readable message.
     Error(String),
 }
