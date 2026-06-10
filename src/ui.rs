@@ -71,7 +71,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_full_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    let show_detail = app.selected.is_some();
+    let show_detail = app.detail_open();
     let show_nav = !app.nav_collapsed;
 
     let mut constraints = Vec::new();

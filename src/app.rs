@@ -1292,7 +1292,10 @@ impl App {
         self.nav = nav;
         self.sections.clear();
         self.selected = None;
+        // Switching lists closes the detail pane (clearing detail_gid stops the
+        // refresh path from re-selecting a task from the previous list).
         self.detail = None;
+        self.detail_gid = None;
         self.scroll = 0;
         if self.client.is_some() {
             self.status = format!("Loading {}…", self.nav_title());
@@ -1584,9 +1587,29 @@ impl App {
                 }
             })
             .collect();
-        self.scroll = 0;
-        self.selected = None;
-        self.detail = None;
+        // Keep the open task's detail pane and re-locate its row so a refresh
+        // doesn't deselect it or close the pane. Nav switches clear detail_gid
+        // (in `select_nav`), so the selection is correctly dropped there.
+        self.selected = self
+            .detail_gid
+            .clone()
+            .and_then(|gid| self.locate_task(&gid));
+    }
+
+    /// Find a task's `(section, index)` position by gid.
+    fn locate_task(&self, gid: &str) -> Option<(usize, usize)> {
+        self.sections.iter().enumerate().find_map(|(si, section)| {
+            section
+                .tasks
+                .iter()
+                .position(|t| t.gid == gid)
+                .map(|ti| (si, ti))
+        })
+    }
+
+    /// Whether the detail pane should be shown (a task is open).
+    pub fn detail_open(&self) -> bool {
+        self.detail_gid.is_some()
     }
 
     /// The columns for the current view (project views can differ from My Tasks).
