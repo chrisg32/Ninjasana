@@ -144,7 +144,10 @@ pub struct DetailConfig {
 }
 
 pub struct Settings {
+    /// Columns for the My Tasks view.
     pub columns: Vec<Column>,
+    /// Columns for project views (defaults to `columns` when unset).
+    pub project_columns: Vec<Column>,
     pub projects: ProjectSource,
     pub detail: DetailConfig,
     /// Show the top header bar (in any mode).
@@ -161,6 +164,12 @@ impl Settings {
             .map(|r| parse_columns(&r.columns))
             .filter(|c| !c.is_empty())
             .unwrap_or_else(default_columns);
+        // Project columns fall back to the My Tasks columns when not configured.
+        let project_columns = raw
+            .as_ref()
+            .map(|r| parse_columns(&r.project_columns))
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| columns.clone());
         let projects = project_source(raw.as_ref().and_then(|r| r.projects.as_ref()));
         let detail = raw
             .as_ref()
@@ -171,6 +180,7 @@ impl Settings {
         let show_footer = raw.as_ref().and_then(|r| r.show_footer).unwrap_or(true);
         Settings {
             columns,
+            project_columns,
             projects,
             detail,
             show_header,
@@ -183,6 +193,8 @@ impl Settings {
 struct RawConfig {
     #[serde(default)]
     columns: Vec<String>,
+    #[serde(default)]
+    project_columns: Vec<String>,
     #[serde(default)]
     projects: Option<RawProjects>,
     #[serde(default)]
@@ -262,6 +274,9 @@ const DEFAULT_TOML: &str = "\
 # Custom fields use a \"custom:\" prefix with the exact Asana field name, e.g.:
 #   \"custom:Priority\"
 columns = [\"name\", \"due_date\", \"assignee\", \"projects\", \"tags\"]
+
+# Optional: a different column set for project views (defaults to `columns`).
+#   project_columns = [\"name\", \"assignee\", \"due_date\", \"custom:Priority\"]
 
 # Which projects appear in the navigation pane. Either a mode:
 #   \"favorites\" — your favorited projects, in sidebar order (default)

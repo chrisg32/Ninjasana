@@ -22,7 +22,7 @@ use crate::asana::{
     AsanaUpdate, Client, Named, Project, Section, Story, Task, TaskListKey, WatchTarget,
 };
 use crate::event::{Event, EventBus};
-use crate::settings::{Column, DetailConfig, ProjectSource};
+use crate::settings::{Column, DetailConfig, ProjectSource, Settings};
 use crate::state::UiState;
 
 /// Minimum width a resizable column can be dragged to.
@@ -61,6 +61,8 @@ pub enum Zone {
     Section(usize),
     /// A task row — `(section index, task index)`.
     TaskRow(usize, usize),
+    /// A hyperlink cell/value — opens the URL in the browser.
+    OpenUrl(String),
     /// A column divider — drag to resize the column at this index.
     ResizeHandle(usize),
     /// Detail pane: the Mark-complete button.
@@ -299,8 +301,10 @@ pub struct App {
     /// Whether the navigation sidebar is collapsed (toggle with Ctrl+B).
     pub nav_collapsed: bool,
 
-    /// Columns shown in the task table, from the user's config.
+    /// Columns shown in the task table for My Tasks.
     pub columns: Vec<Column>,
+    /// Columns shown in the task table for project views.
+    pub project_columns: Vec<Column>,
     /// Which projects to list in the nav pane.
     project_source: ProjectSource,
     /// In-progress drag of a task row, if any.
@@ -315,15 +319,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
-        mode: AppMode,
-        client: Option<Client>,
-        columns: Vec<Column>,
-        project_source: ProjectSource,
-        detail_cfg: DetailConfig,
-        show_header: bool,
-        show_footer: bool,
-    ) -> Self {
+    pub fn new(mode: AppMode, client: Option<Client>, settings: Settings) -> Self {
+        let Settings {
+            columns,
+            project_columns,
+            projects: project_source,
+            detail: detail_cfg,
+            show_header,
+            show_footer,
+        } = settings;
         // A dummy sender; replaced with the real one in `run`.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let offline = client.is_none();
@@ -373,6 +377,7 @@ impl App {
             show_footer,
             nav_collapsed: false,
             columns,
+            project_columns,
             project_source,
             drag: None,
             resize: None,
@@ -653,6 +658,7 @@ impl App {
                 }
             }
             Zone::TaskRow(section, task) => self.select_task(section, task),
+            Zone::OpenUrl(url) => self.open_url(&url),
             Zone::MarkComplete => self.mark_complete(),
             Zone::CopyLink => self.copy_link(),
             Zone::Tab(tab) => {
@@ -722,6 +728,13 @@ impl App {
                     )))));
                 }
             });
+        }
+    }
+
+    fn open_url(&mut self, url: &str) {
+        match open::that(url) {
+            Ok(()) => self.status = format!("Opened {url}"),
+            Err(err) => self.status = format!("Couldn't open link: {err}"),
         }
     }
 
@@ -1513,6 +1526,15 @@ impl App {
         self.detail = None;
     }
 
+    /// The columns for the current view (project views can differ from My Tasks).
+    pub fn active_columns(&self) -> &[Column] {
+        if matches!(self.nav, Nav::Project(_)) {
+            &self.project_columns
+        } else {
+            &self.columns
+        }
+    }
+
     /// Display width for a column: a persisted resize override, else its
     /// default. `Name` returns 0, the renderer's "flex to fill" sentinel.
     pub fn column_width(&self, column: &Column) -> usize {
@@ -1527,7 +1549,7 @@ impl App {
 
     /// Effective width of the column at `index` (used when starting a resize).
     fn effective_width(&self, index: usize) -> usize {
-        self.columns
+        self.active_columns()
             .get(index)
             .map(|c| {
                 self.ui_state
@@ -1543,26 +1565,25 @@ impl App {
     fn apply_resize(&mut self, resize: Resize, cursor_x: u16) {
         let min = MIN_COL_WIDTH as i32;
         let delta = cursor_x as i32 - resize.start_x as i32;
-        let left_flex = self.columns[resize.left].is_name();
-        let right_flex = self.columns[resize.right].is_name();
+        let columns = self.active_columns();
+        let left_flex = columns[resize.left].is_name();
+        let right_flex = columns[resize.right].is_name();
+        let left_key = columns[resize.left].key();
+        let right_key = columns[resize.right].key();
 
         if left_flex {
             // Left side flexes: shrink the right column; flex grows to fill.
             let new_right = (resize.right_start as i32 - delta).max(min);
-            let key = self.columns[resize.right].key();
-            self.ui_state.set_column_width(&key, new_right as usize);
+            self.ui_state.set_column_width(&right_key, new_right as usize);
         } else if right_flex {
             // Right side flexes: grow the left column; flex shrinks to fit.
             let new_left = (resize.left_start as i32 + delta).max(min);
-            let key = self.columns[resize.left].key();
-            self.ui_state.set_column_width(&key, new_left as usize);
+            self.ui_state.set_column_width(&left_key, new_left as usize);
         } else {
             // Both fixed: trade width, keeping the right column at/above the min.
             let max_take = (resize.right_start as i32 - min).max(0);
             let change = (resize.left_start as i32 + delta).max(min) - resize.left_start as i32;
             let change = change.min(max_take);
-            let left_key = self.columns[resize.left].key();
-            let right_key = self.columns[resize.right].key();
             self.ui_state
                 .set_column_width(&left_key, (resize.left_start as i32 + change) as usize);
             self.ui_state

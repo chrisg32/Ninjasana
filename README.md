@@ -158,6 +158,7 @@ ninjasana --help          # full help
 | Click **Copy Link** | Copy the task's URL to the clipboard |
 | Click **Comments** / **All activity** | Switch the conversation tab |
 | Click a **field** | Edit it — picklist, text/number entry, calendar, or user picker by type |
+| Click a **URL** (cell or field value) | Open the link in your browser |
 | Click a **subtask** | Open that subtask in the detail pane |
 | Click the **composer** and type | Add a comment (Enter sends, Esc cancels) |
 | Click **Quit** / `q` / `Esc` | Exit |
@@ -178,6 +179,9 @@ you can just edit it.
 # Custom fields use a "custom:" prefix with the exact Asana field name:
 #   "custom:Priority"
 columns = ["name", "due_date", "assignee", "projects", "tags"]
+
+# Optional: a different column set for project views (defaults to `columns`).
+#   project_columns = ["name", "assignee", "due_date", "custom:Priority"]
 
 # Which projects appear in the navigation pane. Either a mode...
 #   "favorites" — your favorited projects, in sidebar order (default)
@@ -207,7 +211,9 @@ Each entry in `columns` is either a built-in (`name`, `due_date`, `assignee`,
 name with a `custom:` prefix. Custom fields are referenced by name so nothing
 workspace-specific is hardcoded in the binary. The `name` column flexes to fill
 remaining width; the others have fixed widths you can adjust by dragging their
-dividers.
+dividers. Set `project_columns` to use a different set for project views (it
+defaults to `columns`). Cells whose value is a URL (e.g. a "Link to PR" field)
+are clickable — clicking opens the link in your browser.
 
 ### Projects
 

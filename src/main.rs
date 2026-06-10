@@ -50,17 +50,7 @@ async fn main() -> Result<()> {
     let settings = Settings::load();
 
     let mut terminal = tui::init()?;
-    let result = App::new(
-        mode,
-        client,
-        settings.columns,
-        settings.projects,
-        settings.detail,
-        settings.show_header,
-        settings.show_footer,
-    )
-    .run(&mut terminal)
-    .await;
+    let result = App::new(mode, client, settings).run(&mut terminal).await;
     tui::restore()?;
     result
 }

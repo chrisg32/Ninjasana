@@ -189,7 +189,7 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let widths = distribute_widths(app, (inner.width as usize).saturating_sub(2));
 
     let mut header = String::from("  ");
-    for (i, (column, width)) in app.columns.iter().zip(&widths).enumerate() {
+    for (i, (column, width)) in app.active_columns().iter().zip(&widths).enumerate() {
         if i > 0 {
             header.push(DIVIDER);
         }
@@ -248,7 +248,7 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut x = inner.x + 2;
     for (i, width) in widths.iter().enumerate() {
         x += *width as u16;
-        if i + 1 < app.columns.len() {
+        if i + 1 < app.active_columns().len() {
             app.zones.push(
                 Zone::ResizeHandle(i),
                 Rect {
@@ -324,7 +324,7 @@ fn render_task_row(
                 .add_modifier(Modifier::CROSSED_OUT)
         };
         let mut line = format!("{mark} ");
-        for (i, (column, width)) in app.columns.iter().zip(widths).enumerate() {
+        for (i, (column, width)) in app.active_columns().iter().zip(widths).enumerate() {
             if i > 0 {
                 line.push(DIVIDER);
             }
@@ -336,7 +336,7 @@ fn render_task_row(
             format!("{mark} "),
             Style::new().fg(Color::DarkGray),
         )];
-        for (i, (column, width)) in app.columns.iter().zip(widths).enumerate() {
+        for (i, (column, width)) in app.active_columns().iter().zip(widths).enumerate() {
             if i > 0 {
                 spans.push(Span::styled(
                     DIVIDER.to_string(),
@@ -350,6 +350,32 @@ fn render_task_row(
     }
 
     app.zones.push(Zone::TaskRow(si, ti), rect);
+
+    // Hyperlink cells open in the browser; registered after the row so a click
+    // on a link wins over selecting the task.
+    let mut links: Vec<(Rect, String)> = Vec::new();
+    let mut x = rect.x + 2;
+    for (column, width) in app.active_columns().iter().zip(widths) {
+        let value = column.value(&task);
+        if is_url(&value) {
+            let w = (*width as u16).min(rect.right().saturating_sub(x));
+            if w > 0 {
+                links.push((
+                    Rect {
+                        x,
+                        y: rect.y,
+                        width: w,
+                        height: 1,
+                    },
+                    value,
+                ));
+            }
+        }
+        x += *width as u16 + 1; // column + divider
+    }
+    for (cell, url) in links {
+        app.zones.push(Zone::OpenUrl(url), cell);
+    }
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -464,7 +490,8 @@ fn render_properties_block(frame: &mut Frame, app: &mut App, task: &Task, area: 
     }
 
     let dim = Style::new().fg(Color::DarkGray);
-    let rows: Vec<Line> = app
+    // (rendered line, label width, Some(url) if the value is a hyperlink).
+    let rows: Vec<(Line, u16, Option<String>)> = app
         .detail_cfg
         .fields
         .iter()
@@ -475,15 +502,20 @@ fn render_properties_block(frame: &mut Frame, app: &mut App, task: &Task, area: 
             } else {
                 value.clone()
             };
-            Line::from(vec![
-                Span::styled(format!("{}: ", column.title()), dim),
+            let label = format!("{}: ", column.title());
+            let label_width = label.chars().count() as u16;
+            let line = Line::from(vec![
+                Span::styled(label, dim),
                 Span::styled(shown, field_value_style(column, &value)),
-            ])
+            ]);
+            (line, label_width, is_url(&value).then_some(value))
         })
         .collect();
 
     let start = app.props_scroll.min(rows.len().saturating_sub(1));
-    for (offset, line) in rows.iter().skip(start).take(inner.height as usize).enumerate() {
+    for (offset, (line, label_width, url)) in
+        rows.iter().skip(start).take(inner.height as usize).enumerate()
+    {
         let rect = Rect {
             x: inner.x,
             y: inner.y + offset as u16,
@@ -492,6 +524,22 @@ fn render_properties_block(frame: &mut Frame, app: &mut App, task: &Task, area: 
         };
         frame.render_widget(Paragraph::new(line.clone()), rect);
         app.zones.push(Zone::Field(start + offset), rect);
+        // Clicking a hyperlink value opens it; clicking the label still edits.
+        if let Some(url) = url {
+            let lx = inner.x + (*label_width).min(inner.width);
+            let w = inner.width.saturating_sub(*label_width);
+            if w > 0 {
+                app.zones.push(
+                    Zone::OpenUrl(url.clone()),
+                    Rect {
+                        x: lx,
+                        y: rect.y,
+                        width: w,
+                        height: 1,
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -1102,7 +1150,7 @@ fn status_color(value: &str) -> Color {
 /// Distribute `total` columns: fixed columns keep their (possibly resized)
 /// width, `Name` columns split whatever is left (min 12 each).
 fn distribute_widths(app: &App, total: usize) -> Vec<usize> {
-    let columns = &app.columns;
+    let columns = app.active_columns();
     let separators = columns.len().saturating_sub(1);
     let fixed: usize = columns
         .iter()
@@ -1126,6 +1174,11 @@ fn distribute_widths(app: &App, total: usize) -> Vec<usize> {
 
 /// Truncate (with an ellipsis) or pad `s` to exactly `width` display columns,
 /// counting by character (a good-enough proxy for mostly-ASCII task text).
+/// Whether a value is a clickable web link.
+fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
 fn fit(s: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
