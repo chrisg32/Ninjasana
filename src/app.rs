@@ -6,6 +6,7 @@
 //! mode, the rectangles we hit-test against are the very same ones we just laid
 //! out — one coordinate system, no second source of truth.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -242,6 +243,8 @@ pub struct App {
 
     // Middle pane.
     pub sections: Vec<SectionView>,
+    /// Gids of tasks blocked by incomplete dependencies (resolved async).
+    pub blocked: HashSet<String>,
     pub scroll: usize,
     /// `(section index, task index)` of the selected task.
     pub selected: Option<(usize, usize)>,
@@ -344,6 +347,7 @@ impl App {
             projects: Vec::new(),
             nav: Nav::MyTasks,
             sections: Vec::new(),
+            blocked: HashSet::new(),
             scroll: 0,
             selected: None,
             viewport_rows: 0,
@@ -1323,6 +1327,7 @@ impl App {
                 self.status = "Task created.".into();
                 self.load_tasks_for(self.nav);
             }
+            AsanaUpdate::Blocked(gids) => self.blocked = gids.into_iter().collect(),
             AsanaUpdate::Done(message) => self.status = message,
             AsanaUpdate::Error(message) => {
                 self.detail_loading = false;
@@ -1640,6 +1645,32 @@ impl App {
             .detail_gid
             .clone()
             .and_then(|gid| self.locate_task(&gid));
+        self.resolve_blocked();
+    }
+
+    /// Resolve which visible tasks are dependency-blocked (their dependency
+    /// completion isn't available inline), then replace `self.blocked`.
+    fn resolve_blocked(&self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let gids: Vec<String> = self
+            .sections
+            .iter()
+            .flat_map(|s| s.tasks.iter())
+            .filter(|t| t.has_dependencies())
+            .map(|t| t.gid.clone())
+            .collect();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut blocked = Vec::new();
+            for gid in gids {
+                if client.task_blocked(&gid).await.unwrap_or(false) {
+                    blocked.push(gid);
+                }
+            }
+            let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Blocked(blocked))));
+        });
     }
 
     /// Find a task's `(section, index)` position by gid.

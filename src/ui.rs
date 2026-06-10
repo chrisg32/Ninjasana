@@ -302,7 +302,7 @@ fn render_task_row(
         "≡"
     } else if task.completed {
         "✔"
-    } else if task.is_blocked() {
+    } else if app.blocked.contains(&task.gid) {
         "⧖"
     } else {
         "○"

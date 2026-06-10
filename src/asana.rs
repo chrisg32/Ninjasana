@@ -59,6 +59,8 @@ pub enum AsanaUpdate {
     ResourceChanged { target: WatchTarget, gid: String },
     /// A new task was created; the current list should refresh.
     TaskCreated,
+    /// The gids of tasks currently blocked by incomplete dependencies.
+    Blocked(Vec<String>),
     /// An async action finished successfully; carries a status message.
     Done(String),
     /// Something went wrong; carries a human-readable message.
@@ -238,9 +240,11 @@ pub struct Dependency {
 }
 
 impl Task {
-    /// Blocked = incomplete and waiting on at least one unfinished dependency.
-    pub fn is_blocked(&self) -> bool {
-        !self.completed && self.dependencies.iter().any(|d| !d.completed)
+    /// Whether this task has any dependencies at all (their completion isn't
+    /// available inline — Asana returns dependency refs as gid-only, so blocked
+    /// state is resolved with a follow-up fetch; see `Client::task_blocked`).
+    pub fn has_dependencies(&self) -> bool {
+        !self.completed && !self.dependencies.is_empty()
     }
 
     /// Names of the projects this task belongs to.
@@ -269,6 +273,11 @@ impl Task {
             .and_then(|f| f.display_value.clone())
             .filter(|v| !v.is_empty())
     }
+}
+
+/// True if any dependency is unfinished (so the dependent task is blocked).
+fn deps_blocked(deps: &[Dependency]) -> bool {
+    deps.iter().any(|d| !d.completed)
 }
 
 /// Match a configured field name against an Asana field name, tolerating stray
@@ -477,7 +486,7 @@ impl Client {
                             "opt_fields",
                             "name,completed,due_on,assignee.name,memberships.project.name,\
                              tags.name,custom_fields.name,custom_fields.display_value,\
-                             dependencies.completed",
+                             dependencies",
                         ),
                     ],
                 )
@@ -515,7 +524,7 @@ impl Client {
                         "opt_fields",
                         "name,completed,due_on,assignee.name,assignee_section.name,\
                          memberships.project.name,tags.name,custom_fields.name,\
-                         custom_fields.display_value,dependencies.completed",
+                         custom_fields.display_value,dependencies",
                     ),
                 ],
             )
@@ -576,6 +585,18 @@ impl Client {
             &[("limit", "100"), ("opt_fields", "name,completed")],
         )
         .await
+    }
+
+    /// Whether a task is blocked: it has at least one incomplete dependency.
+    /// (Dependency completion isn't available inline, so we fetch it here.)
+    pub async fn task_blocked(&self, gid: &str) -> Result<bool> {
+        let deps: Vec<Dependency> = self
+            .get_all(
+                &format!("tasks/{gid}/dependencies"),
+                &[("limit", "100"), ("opt_fields", "completed")],
+            )
+            .await?;
+        Ok(deps_blocked(&deps))
     }
 
     /// Mark a task complete (or incomplete).
@@ -925,15 +946,11 @@ mod tests {
     }
 
     #[test]
-    fn is_blocked_reflects_incomplete_dependencies() {
-        let parse = |json: &str| -> Task { serde_json::from_str(json).unwrap() };
-        assert!(parse(r#"{"gid":"1","name":"A","dependencies":[{"completed":false}]}"#).is_blocked());
-        assert!(!parse(r#"{"gid":"2","name":"B","dependencies":[{"completed":true}]}"#).is_blocked());
-        assert!(!parse(r#"{"gid":"3","name":"C"}"#).is_blocked());
-        // A completed task is not "blocked" even with an unfinished dependency.
-        assert!(
-            !parse(r#"{"gid":"4","name":"D","completed":true,"dependencies":[{"completed":false}]}"#)
-                .is_blocked()
-        );
+    fn deps_blocked_when_any_dependency_incomplete() {
+        use super::{deps_blocked, Dependency};
+        let dep = |completed| Dependency { completed };
+        assert!(deps_blocked(&[dep(true), dep(false)]));
+        assert!(!deps_blocked(&[dep(true), dep(true)]));
+        assert!(!deps_blocked(&[]));
     }
 }
