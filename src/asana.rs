@@ -219,6 +219,9 @@ pub struct Task {
     pub tags: Vec<Named>,
     #[serde(default)]
     pub custom_fields: Vec<CustomField>,
+    /// Tasks this one depends on (only their `completed` flag is fetched).
+    #[serde(default)]
+    pub dependencies: Vec<Dependency>,
     // Populated for the detail view (see `task`).
     #[serde(default)]
     pub notes: String,
@@ -226,7 +229,20 @@ pub struct Task {
     pub permalink_url: Option<String>,
 }
 
+/// A task dependency — we only need whether it's complete to know if the
+/// dependent task is blocked.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dependency {
+    #[serde(default)]
+    pub completed: bool,
+}
+
 impl Task {
+    /// Blocked = incomplete and waiting on at least one unfinished dependency.
+    pub fn is_blocked(&self) -> bool {
+        !self.completed && self.dependencies.iter().any(|d| !d.completed)
+    }
+
     /// Names of the projects this task belongs to.
     pub fn project_names(&self) -> Vec<String> {
         self.memberships
@@ -460,7 +476,8 @@ impl Client {
                         (
                             "opt_fields",
                             "name,completed,due_on,assignee.name,memberships.project.name,\
-                             tags.name,custom_fields.name,custom_fields.display_value",
+                             tags.name,custom_fields.name,custom_fields.display_value,\
+                             dependencies.completed",
                         ),
                     ],
                 )
@@ -498,7 +515,7 @@ impl Client {
                         "opt_fields",
                         "name,completed,due_on,assignee.name,assignee_section.name,\
                          memberships.project.name,tags.name,custom_fields.name,\
-                         custom_fields.display_value",
+                         custom_fields.display_value,dependencies.completed",
                     ),
                 ],
             )
@@ -905,5 +922,18 @@ mod tests {
         assert_eq!(task.custom_field("Priority").as_deref(), Some("2. Development"));
         assert_eq!(task.custom_field("Empty"), None);
         assert_eq!(task.custom_field("Missing"), None);
+    }
+
+    #[test]
+    fn is_blocked_reflects_incomplete_dependencies() {
+        let parse = |json: &str| -> Task { serde_json::from_str(json).unwrap() };
+        assert!(parse(r#"{"gid":"1","name":"A","dependencies":[{"completed":false}]}"#).is_blocked());
+        assert!(!parse(r#"{"gid":"2","name":"B","dependencies":[{"completed":true}]}"#).is_blocked());
+        assert!(!parse(r#"{"gid":"3","name":"C"}"#).is_blocked());
+        // A completed task is not "blocked" even with an unfinished dependency.
+        assert!(
+            !parse(r#"{"gid":"4","name":"D","completed":true,"dependencies":[{"completed":false}]}"#)
+                .is_blocked()
+        );
     }
 }

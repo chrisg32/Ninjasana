@@ -296,10 +296,14 @@ fn render_task_row(
     let is_grabbed = drag.is_some_and(|d| d.moved && d.from == (si, ti));
     let is_drop = drag.is_some_and(|d| d.moved && d.over == Some(DropTarget::Task(si, ti)));
 
+    // Blocked (incomplete with unfinished dependencies) shows an hourglass,
+    // mirroring Asana's web list.
     let mark = if is_grabbed {
         "≡"
     } else if task.completed {
         "✔"
+    } else if task.is_blocked() {
+        "⧖"
     } else {
         "○"
     };

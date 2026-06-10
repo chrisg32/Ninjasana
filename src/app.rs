@@ -1877,6 +1877,7 @@ fn demo_task(gid: &str, name: &str, completed: bool, due: Option<&str>) -> Task 
             multi_enum_values: Vec::new(),
             date_value: None,
         }],
+        dependencies: Vec::new(),
         notes: format!(
             "Demo description for \"{name}\".\n\nConnect a real account with \
              `ninjasana login` to see live notes, fields, and the comment thread."
