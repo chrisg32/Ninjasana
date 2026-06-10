@@ -140,7 +140,12 @@ ninjasana --help          # full help
 
 `<task_url>` accepts a full Asana task URL (e.g.
 `https://app.asana.com/0/<project>/<task>` or the newer
-`.../task/<task>` form) or a bare numeric task id.
+`.../task/<task>` form) or a bare numeric task id. Any `?query` / `#fragment`
+is ignored.
+
+> In zsh/bash, a URL with a `?` (e.g. `?focus=true`) must be **quoted**, since
+> `?` is a glob character — `ninjasana 'https://…?focus=true'`. To paste them
+> unquoted, add a no-glob alias: `alias ninjasana='noglob ninjasana'`.
 
 ## Controls
 

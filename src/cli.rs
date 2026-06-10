@@ -86,6 +86,19 @@ mod tests {
     }
 
     #[test]
+    fn url_with_query_and_fragment() {
+        // Multiple query params and a fragment are stripped before parsing.
+        let url = "https://app.asana.com/1/55/project/77/task/1201234567890?focus=true&x=1#c";
+        assert_eq!(parse_task_gid(url).unwrap(), "1201234567890");
+    }
+
+    #[test]
+    fn classic_url_with_query() {
+        let url = "https://app.asana.com/0/1199999999/1201234567890?foo=bar";
+        assert_eq!(parse_task_gid(url).unwrap(), "1201234567890");
+    }
+
+    #[test]
     fn no_id() {
         assert!(parse_task_gid("https://example.com/nope").is_err());
     }
