@@ -448,6 +448,22 @@ impl App {
         }
     }
 
+    /// Force a full reload: re-fetch the workspace/projects + current list, and
+    /// the open task's detail/comments/subtasks. (Live sync does this on change;
+    /// this is the manual "pull latest now" hammer.)
+    fn refresh_all(&mut self) {
+        if self.client.is_none() {
+            return;
+        }
+        if matches!(self.mode, AppMode::Full) {
+            self.start_full();
+        }
+        if let Some(gid) = self.detail_gid.clone() {
+            self.load_detail(gid);
+        }
+        self.status = "Refreshing…".into();
+    }
+
     // ---- event handling ------------------------------------------------
 
     fn handle_crossterm(&mut self, event: CrosstermEvent) {
@@ -518,6 +534,7 @@ impl App {
             }
             KeyCode::Char('b') => self.nav_collapsed = !self.nav_collapsed,
             KeyCode::Char('n') => self.open_new_task(),
+            KeyCode::Char('r') => self.refresh_all(),
             KeyCode::Down | KeyCode::Char('j') => self.select_task_delta(1),
             KeyCode::Up | KeyCode::Char('k') => self.select_task_delta(-1),
             _ => {}

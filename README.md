@@ -160,6 +160,7 @@ is ignored.
 | ↑ / ↓ or `j` / `k` | Move task selection |
 | `b` | Collapse / expand the navigation sidebar |
 | `n` | New task — type a name, Enter creates it assigned to you (in the current project if viewing one) |
+| `r` | Reload everything now (projects, current list, and the open task) |
 | Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
 | Click **Copy Link** | Copy the task's URL to the clipboard |
 | Click **Comments** / **All activity** | Switch the conversation tab |
