@@ -1014,11 +1014,23 @@ impl App {
     }
 
     fn load_users(&self) {
-        let (Some(client), Some(workspace)) = (self.client.clone(), self.workspace.clone()) else {
+        let Some(client) = self.client.clone() else {
             return;
         };
+        // In task-URL mode we never bootstrapped, so resolve the workspace here.
+        let workspace = self.workspace.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
+            let workspace = match workspace {
+                Some(w) => w,
+                None => match client.workspaces().await {
+                    Ok(list) => match list.into_iter().next() {
+                        Some(w) => w.gid,
+                        None => return,
+                    },
+                    Err(_) => return,
+                },
+            };
             if let Ok(users) = client.users(&workspace).await {
                 let _ = tx.send(Event::Asana(Box::new(AsanaUpdate::Users(users))));
             }
