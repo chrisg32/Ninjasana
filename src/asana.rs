@@ -57,6 +57,8 @@ pub enum AsanaUpdate {
     Users(Vec<User>),
     /// A watched resource changed; the app should refresh it.
     ResourceChanged { target: WatchTarget, gid: String },
+    /// A new task was created; the current list should refresh.
+    TaskCreated,
     /// Something went wrong; carries a human-readable message.
     Error(String),
 }
@@ -565,6 +567,25 @@ impl Client {
             json!({ "data": { "completed": completed } }),
         )
         .await
+    }
+
+    /// Create a task assigned to `assignee` (e.g. "me"), optionally in a project.
+    pub async fn create_task(
+        &self,
+        workspace_gid: &str,
+        name: &str,
+        assignee: Option<&str>,
+        project_gid: Option<&str>,
+    ) -> Result<()> {
+        let mut data = json!({ "name": name, "workspace": workspace_gid });
+        if let Some(assignee) = assignee {
+            data["assignee"] = json!(assignee);
+        }
+        if let Some(project) = project_gid {
+            data["projects"] = json!([project]);
+        }
+        self.write(reqwest::Method::POST, "tasks", json!({ "data": data }))
+            .await
     }
 
     /// Post a comment on a task.

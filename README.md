@@ -154,6 +154,7 @@ ninjasana --help          # full help
 | Scroll wheel | Scroll whichever region is under the cursor (task list, or the detail pane's Description / Properties / Subtasks / Conversation) |
 | ↑ / ↓ or `j` / `k` | Move task selection |
 | `b` | Collapse / expand the navigation sidebar |
+| `n` | New task — type a name, Enter creates it assigned to you (in the current project if viewing one) |
 | Click **Mark complete** | Complete the task (asks first if `confirm_complete`) |
 | Click **Copy Link** | Copy the task's URL to the clipboard |
 | Click **Comments** / **All activity** | Switch the conversation tab |

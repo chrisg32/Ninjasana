@@ -65,6 +65,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.confirm_complete_open {
         render_confirm_dialog(frame, app);
     }
+    if let Some(buffer) = app.new_task_buffer() {
+        render_new_task_dialog(frame, buffer);
+    }
 }
 
 fn render_full_body(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -627,23 +630,27 @@ fn render_detail_buttons(frame: &mut Frame, app: &mut App, task: &Task, area: Re
 }
 
 fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
+    // The new-task entry is a separate modal, not this composer.
+    let input = app
+        .input
+        .as_ref()
+        .filter(|i| !matches!(i.target, crate::app::InputTarget::NewTask));
     let editing_comment = matches!(
-        app.input.as_ref().map(|i| &i.target),
+        input.map(|i| &i.target),
         Some(crate::app::InputTarget::Comment)
     );
-    let (title, body): (&str, String) = match &app.input {
+    let active = input.is_some();
+    let (title, body): (&str, String) = match input {
         Some(input) => {
             let label = match input.target {
                 crate::app::InputTarget::Comment => " New comment ",
-                crate::app::InputTarget::Field(_) | crate::app::InputTarget::NumberField(_) => {
-                    " Edit field "
-                }
+                _ => " Edit field ",
             };
             (label, format!("{}▏", input.buffer))
         }
         None => (" Comment ", "Click to add a comment…".to_string()),
     };
-    let border = if app.input.is_some() {
+    let border = if active {
         Style::new().fg(ACCENT)
     } else {
         Style::new().fg(Color::DarkGray)
@@ -654,7 +661,7 @@ fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let text_style = if app.input.is_some() {
+    let text_style = if active {
         Style::new()
     } else {
         Style::new().fg(Color::DarkGray)
@@ -664,7 +671,7 @@ fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         inner,
     );
     // Only the comment composer is click-to-focus; field edits open from a row.
-    if app.input.is_none() || editing_comment {
+    if !active || editing_comment {
         app.zones.push(Zone::Composer, area);
     }
 }
@@ -748,6 +755,38 @@ fn render_thread(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: false })
             .scroll((app.thread_scroll as u16, 0)),
         area,
+    );
+}
+
+fn render_new_task_dialog(frame: &mut Frame, buffer: &str) {
+    let screen = frame.area();
+    let w = 56u16.min(screen.width.saturating_sub(2));
+    let h = 5u16.min(screen.height.saturating_sub(2));
+    let rect = centered(screen, w, h);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" New task ")
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.height == 0 {
+        return;
+    }
+    let [field, _gap, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!("{buffer}▏")).wrap(Wrap { trim: false }),
+        field,
+    );
+    frame.render_widget(
+        Paragraph::new("Enter: create (assigned to you) · Esc: cancel")
+            .style(Style::new().fg(Color::DarkGray)),
+        hint,
     );
 }
 
@@ -1088,7 +1127,7 @@ fn format_time(iso: &str) -> String {
 fn render_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints = match app.mode {
         AppMode::Full => {
-            " click: open · drag row: reorder · drag │: resize · ↑/↓: move · b: nav · q: quit "
+            " click: open · drag: reorder/resize · ↑/↓: move · n: new · b: nav · q: quit "
         }
         AppMode::TaskDetail(_) => " q: quit ",
     };

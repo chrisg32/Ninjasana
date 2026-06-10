@@ -181,6 +181,8 @@ pub enum InputTarget {
     Field(String),
     /// Set the number value of a custom field (carries the field gid).
     NumberField(String),
+    /// Create a new task with the entered name.
+    NewTask,
 }
 
 /// An active text-entry buffer (comment composer or field edit).
@@ -515,6 +517,7 @@ impl App {
                 self.running = false
             }
             KeyCode::Char('b') => self.nav_collapsed = !self.nav_collapsed,
+            KeyCode::Char('n') => self.open_new_task(),
             KeyCode::Down | KeyCode::Char('j') => self.select_task_delta(1),
             KeyCode::Up | KeyCode::Char('k') => self.select_task_delta(-1),
             _ => {}
@@ -522,6 +525,10 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // The new-task dialog is keyboard-only; ignore clicks behind it.
+        if self.new_task_open() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(zone) = self.zones.hit(mouse.column, mouse.row) else {
@@ -1121,6 +1128,7 @@ impl App {
                 let display = if text.is_empty() { "—".to_string() } else { text };
                 self.write_custom_field(field_gid, value, display);
             }
+            InputTarget::NewTask => self.create_task(text),
         }
     }
 
@@ -1166,6 +1174,57 @@ impl App {
         {
             field.display_value = Some(display.to_string());
         }
+    }
+
+    /// Whether the new-task name dialog is open.
+    fn new_task_open(&self) -> bool {
+        self.new_task_buffer().is_some()
+    }
+
+    /// The current new-task name buffer, if the dialog is open.
+    pub fn new_task_buffer(&self) -> Option<&str> {
+        match self.input.as_ref() {
+            Some(input) if input.target == InputTarget::NewTask => Some(&input.buffer),
+            _ => None,
+        }
+    }
+
+    fn open_new_task(&mut self) {
+        if self.client.is_none() {
+            self.status = "Log in to add tasks.".into();
+            return;
+        }
+        self.input = Some(Input {
+            target: InputTarget::NewTask,
+            buffer: String::new(),
+        });
+        self.status = "New task — type a name, Enter to create, Esc to cancel.".into();
+    }
+
+    fn create_task(&mut self, name: String) {
+        if name.is_empty() {
+            return;
+        }
+        let (Some(client), Some(workspace)) = (self.client.clone(), self.workspace.clone()) else {
+            return;
+        };
+        // Assign to me; include the current project when viewing one.
+        let project = match self.nav {
+            Nav::Project(i) => self.projects.get(i).map(|p| p.gid.clone()),
+            Nav::MyTasks => None,
+        };
+        self.status = format!("Creating \"{name}\"…");
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let update = match client
+                .create_task(&workspace, &name, Some("me"), project.as_deref())
+                .await
+            {
+                Ok(()) => AsanaUpdate::TaskCreated,
+                Err(err) => AsanaUpdate::Error(format!("create failed: {err:#}")),
+            };
+            let _ = tx.send(Event::Asana(Box::new(update)));
+        });
     }
 
     fn handle_asana(&mut self, update: AsanaUpdate) {
@@ -1215,6 +1274,10 @@ impl App {
             }
             AsanaUpdate::Users(users) => self.users = users,
             AsanaUpdate::ResourceChanged { target, gid } => self.on_resource_changed(target, &gid),
+            AsanaUpdate::TaskCreated => {
+                self.status = "Task created.".into();
+                self.load_tasks_for(self.nav);
+            }
             AsanaUpdate::Error(message) => {
                 self.detail_loading = false;
                 self.stories_loading = false;
